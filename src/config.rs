@@ -63,6 +63,7 @@ impl Default for Config {
                 temperature: Some(0.7),
                 max_tokens: Some(1000),
                 github_token: None,
+                gemini_api_key: None,
             },
             calendar: CalendarConfig {
                 google: None,
