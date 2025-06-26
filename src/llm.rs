@@ -11,6 +11,7 @@ pub enum LLMProvider {
     OpenAI,
     GitHubCopilot,
     AzureOpenAI,
+    Gemini,
 }
 
 pub struct LLMClient {
@@ -53,6 +54,7 @@ impl LLMClient {
         let provider = match llm_config.provider.as_deref().unwrap_or("openai") {
             "github_copilot" => LLMProvider::GitHubCopilot,
             "azure_openai" => LLMProvider::AzureOpenAI,
+            "gemini" => LLMProvider::Gemini,
             _ => LLMProvider::OpenAI,
         };
         
@@ -64,6 +66,12 @@ impl LLMClient {
                     .or_else(|| env::var("GITHUB_TOKEN").ok())
                     .or_else(|| env::var("GITHUB_COPILOT_TOKEN").ok())
                     .ok_or_else(|| anyhow!("GitHub token not found. Please set github_token in config or GITHUB_TOKEN environment variable"))?
+            },
+            LLMProvider::Gemini => {
+                llm_config.gemini_api_key
+                    .clone()
+                    .or_else(|| env::var("GEMINI_API_KEY").ok())
+                    .ok_or_else(|| anyhow!("Gemini API key not found. Please set gemini_api_key in config or GEMINI_API_KEY environment variable"))?
             },
             _ => {
                 llm_config.api_key
@@ -81,10 +89,12 @@ impl LLMClient {
                 LLMProvider::GitHubCopilot => Some("https://api.githubcopilot.com".to_string()),
                 LLMProvider::OpenAI => Some("https://api.openai.com/v1".to_string()),
                 LLMProvider::AzureOpenAI => env::var("AZURE_OPENAI_ENDPOINT").ok(),
+                LLMProvider::Gemini => Some("https://generativelanguage.googleapis.com/v1beta".to_string()),
             })
             .unwrap_or_else(|| match provider {
                 LLMProvider::GitHubCopilot => "https://api.githubcopilot.com".to_string(),
                 LLMProvider::AzureOpenAI => "https://your-resource.openai.azure.com".to_string(),
+                LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
                 _ => "https://api.openai.com/v1".to_string(),
             });
         
@@ -93,6 +103,7 @@ impl LLMClient {
             .clone()
             .unwrap_or_else(|| match provider {
                 LLMProvider::GitHubCopilot => "gpt-4".to_string(),
+                LLMProvider::Gemini => "gemini-1.5-flash".to_string(),
                 _ => "gpt-3.5-turbo".to_string(),
             });
         
@@ -135,6 +146,7 @@ impl LLMClient {
             LLMProvider::GitHubCopilot => "GitHub Copilot",
             LLMProvider::OpenAI => "OpenAI",
             LLMProvider::AzureOpenAI => "Azure OpenAI",
+            LLMProvider::Gemini => "Gemini",
         };
 
         let response_json = json!({

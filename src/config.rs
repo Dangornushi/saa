@@ -13,13 +13,14 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMConfig {
-    pub provider: Option<String>, // "openai", "github_copilot", "azure_openai"
+    pub provider: Option<String>, // "openai", "github_copilot", "azure_openai", "gemini"
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub github_token: Option<String>, // GitHub Personal Access Token for Copilot
+    pub gemini_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
