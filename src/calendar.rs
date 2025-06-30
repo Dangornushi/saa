@@ -1,203 +1,149 @@
-use crate::models::{Event, Schedule};
-use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
-// use reqwest::Client;
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use anyhow::Result;
+use chrono::{DateTime, Utc, Duration};
+use schedule_ai_agent::GoogleCalendarClient;
+use google_calendar3::api::{Event, Events};
 
-pub trait CalendarProvider {
-    fn sync_events(&self, schedule: &mut Schedule) -> Result<()>;
-    fn create_event(&self, event: &Event) -> Result<String>;
-    fn update_event(&self, external_id: &str, event: &Event) -> Result<()>;
-    fn delete_event(&self, external_id: &str) -> Result<()>;
+/// カレンダーサービス
+pub struct CalendarService {
+    client: GoogleCalendarClient,
 }
 
-pub struct GoogleCalendarProvider {
-    access_token: String,
-    calendar_id: String,
-}
-
-impl GoogleCalendarProvider {
-    pub fn new(access_token: String, calendar_id: Option<String>) -> Self {
-        Self {
-            access_token,
-            calendar_id: calendar_id.unwrap_or_else(|| "primary".to_string()),
-        }
+impl CalendarService {
+    /// 新しいカレンダーサービスを作成
+    pub async fn new(client_secret_path: &str, token_cache_path: &str) -> Result<Self> {
+        let client = GoogleCalendarClient::new(client_secret_path, token_cache_path).await?;
+        Ok(Self { client })
     }
 
-    fn get_events(&self, _time_min: DateTime<Utc>, _time_max: DateTime<Utc>) -> Result<Vec<GoogleCalendarEvent>> {
-        // Google Calendar API連携は将来実装
-        Ok(Vec::new())
+    /// 今日の予定を取得する
+    pub async fn get_today_events(&self) -> Result<Events> {
+        let now = Utc::now();
+        let start_of_day = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let end_of_day = now.date_naive().and_hms_opt(23, 59, 59).unwrap().and_utc();
+        
+        self.client.get_events_in_range(
+            "primary",
+            start_of_day,
+            end_of_day,
+            50
+        ).await
     }
 
-    fn parse_google_event(&self, item: &Value) -> Result<GoogleCalendarEvent> {
-        let id = item["id"].as_str().ok_or_else(|| anyhow!("Missing event ID"))?.to_string();
-        let summary = item["summary"].as_str().unwrap_or("無題").to_string();
-        let description = item["description"].as_str().map(|s| s.to_string());
-        let location = item["location"].as_str().map(|s| s.to_string());
-
-        let start_time = self.parse_datetime(&item["start"])?;
-        let end_time = self.parse_datetime(&item["end"])?;
-
-        Ok(GoogleCalendarEvent {
-            id,
-            summary,
-            description,
-            location,
-            start_time,
-            end_time,
-        })
+    /// 今週の予定を取得する
+    pub async fn get_week_events(&self) -> Result<Events> {
+        let now = Utc::now();
+        let week_later = now + Duration::weeks(1);
+        
+        self.client.get_events_in_range(
+            "primary",
+            now,
+            week_later,
+            100
+        ).await
     }
 
-    fn parse_datetime(&self, datetime_obj: &Value) -> Result<DateTime<Utc>> {
-        if let Some(datetime_str) = datetime_obj["dateTime"].as_str() {
-            DateTime::parse_from_rfc3339(datetime_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| anyhow!("Failed to parse datetime: {}", e))
-        } else if let Some(date_str) = datetime_obj["date"].as_str() {
-            let naive_date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
-            Ok(naive_date.and_hms_opt(0, 0, 0).unwrap().and_utc())
+    /// 指定した期間の予定を取得する
+    pub async fn get_events_in_period(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        max_results: i32
+    ) -> Result<Events> {
+        self.client.get_events_in_range("primary", start, end, max_results).await
+    }
+
+    /// 空き時間を検索する
+    pub async fn find_free_time(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        duration_minutes: i64
+    ) -> Result<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
+        let events = self.get_events_in_period(start, end, 100).await?;
+        let mut free_slots = Vec::new();
+        
+        if let Some(items) = &events.items {
+            let mut busy_times = Vec::new();
+            
+            // 忙しい時間帯を収集
+            for event in items {
+                if let (Some(start_time), Some(end_time)) = (
+                    event.start.as_ref().and_then(|s| s.date_time.as_ref()),
+                    event.end.as_ref().and_then(|e| e.date_time.as_ref())
+                ) {
+                    busy_times.push((start_time.clone(), end_time.clone()));
+                }
+            }
+            
+            // 忙しい時間帯をソート
+            busy_times.sort_by(|a, b| a.0.cmp(&b.0));
+            
+            // 空き時間を計算
+            let mut current_time = start;
+            let duration = Duration::minutes(duration_minutes);
+            
+            for (busy_start, busy_end) in busy_times {
+                // 現在時刻から忙しい時間帯の開始まで空きがあるかチェック
+                if busy_start > current_time && busy_start - current_time >= duration {
+                    free_slots.push((current_time, busy_start));
+                }
+                current_time = current_time.max(busy_end);
+            }
+            
+            // 最後の忙しい時間帯から終了時刻まで空きがあるかチェック
+            if current_time < end && end - current_time >= duration {
+                free_slots.push((current_time, end));
+            }
         } else {
-            Err(anyhow!("No valid datetime found"))
+            // イベントがない場合は全体が空き時間
+            free_slots.push((start, end));
         }
+        
+        Ok(free_slots)
     }
 
-    fn event_to_google_format(&self, event: &Event) -> Value {
-        let mut google_event = json!({
-            "summary": event.title,
-            "start": {
-                "dateTime": event.start_time.to_rfc3339(),
-                "timeZone": "UTC"
-            },
-            "end": {
-                "dateTime": event.end_time.to_rfc3339(),
-                "timeZone": "UTC"
-            }
-        });
-
-        if let Some(ref description) = event.description {
-            google_event["description"] = json!(description);
+    /// イベントを作成する
+    pub async fn create_event(
+        &self,
+        title: &str,
+        description: Option<&str>,
+        location: Option<&str>,
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>
+    ) -> Result<Event> {
+        use schedule_ai_agent::EventBuilder;
+        
+        let mut builder = EventBuilder::new()
+            .summary(title)
+            .start_time(start_time)
+            .end_time(end_time);
+            
+        if let Some(desc) = description {
+            builder = builder.description(desc);
         }
-
-        if let Some(ref location) = event.location {
-            google_event["location"] = json!(location);
+        
+        if let Some(loc) = location {
+            builder = builder.location(loc);
         }
-
-        if !event.attendees.is_empty() {
-            let attendees: Vec<Value> = event.attendees
-                .iter()
-                .map(|email| json!({"email": email}))
-                .collect();
-            google_event["attendees"] = json!(attendees);
-        }
-
-        google_event
-    }
-}
-
-impl CalendarProvider for GoogleCalendarProvider {
-    fn sync_events(&self, _schedule: &mut Schedule) -> Result<()> {
-        // Google Calendar連携は将来実装
-        Err(anyhow!("Google Calendar連携は未実装です"))
+        
+        let event = builder.build();
+        self.client.create_primary_event(event).await
     }
 
-    fn create_event(&self, _event: &Event) -> Result<String> {
-        Err(anyhow!("Google Calendar連携は未実装です"))
-    }
-
-    fn update_event(&self, _external_id: &str, _event: &Event) -> Result<()> {
-        Err(anyhow!("Google Calendar連携は未実装です"))
-    }
-
-    fn delete_event(&self, _external_id: &str) -> Result<()> {
-        Err(anyhow!("Google Calendar連携は未実装です"))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct GoogleCalendarEvent {
-    id: String,
-    summary: String,
-    description: Option<String>,
-    location: Option<String>,
-    start_time: DateTime<Utc>,
-    end_time: DateTime<Utc>,
-}
-
-// Notion Calendar連携（将来実装用の基盤）
-pub struct NotionCalendarProvider {
-    api_key: String,
-    database_id: String,
-}
-
-impl NotionCalendarProvider {
-    pub fn new(api_key: String, database_id: String) -> Self {
-        Self {
-            api_key,
-            database_id,
-        }
-    }
-}
-
-impl CalendarProvider for NotionCalendarProvider {
-    fn sync_events(&self, _schedule: &mut Schedule) -> Result<()> {
-        // Notion API実装（将来の拡張用）
-        Err(anyhow!("Notion Calendar連携は未実装です"))
-    }
-
-    fn create_event(&self, _event: &Event) -> Result<String> {
-        Err(anyhow!("Notion Calendar連携は未実装です"))
-    }
-
-    fn update_event(&self, _external_id: &str, _event: &Event) -> Result<()> {
-        Err(anyhow!("Notion Calendar連携は未実装です"))
-    }
-
-    fn delete_event(&self, _external_id: &str) -> Result<()> {
-        Err(anyhow!("Notion Calendar連携は未実装です"))
-    }
-}
-
-// カレンダー連携マネージャー
-pub struct CalendarManager {
-    providers: HashMap<String, Box<dyn CalendarProvider + Send + Sync>>,
-}
-
-impl CalendarManager {
-    pub fn new() -> Self {
-        Self {
-            providers: HashMap::new(),
-        }
-    }
-
-    pub fn add_provider(&mut self, name: String, provider: Box<dyn CalendarProvider + Send + Sync>) {
-        self.providers.insert(name, provider);
-    }
-
-    pub fn sync_all(&self, schedule: &mut Schedule) -> Result<()> {
-        for (name, provider) in &self.providers {
-            match provider.sync_events(schedule) {
-                Ok(()) => println!("{}との同期が完了しました", name),
-                Err(e) => println!("{}との同期でエラーが発生しました: {}", name, e),
-            }
-        }
+    /// カレンダー情報をコンソールに表示する
+    pub async fn display_calendar_summary(&self) -> Result<()> {
+        println!("=== カレンダー情報 ===");
+        
+        // 今日の予定
+        println!("\n📅 今日の予定:");
+        let today_events = self.get_today_events().await?;
+        self.client.display_events(&today_events);
+        
+        // 今週の予定数
+        let week_events = self.get_week_events().await?;
+        let week_count = week_events.items.as_ref().map_or(0, |v| v.len());
+        println!("\n📊 今週の予定数: {} 件", week_count);
+        
         Ok(())
-    }
-
-    pub fn create_event_in_all(&self, event: &Event) -> Result<HashMap<String, String>> {
-        let mut external_ids = HashMap::new();
-
-        for (name, provider) in &self.providers {
-            match provider.create_event(event) {
-                Ok(external_id) => {
-                    external_ids.insert(name.clone(), external_id);
-                }
-                Err(e) => {
-                    println!("{}でのイベント作成でエラーが発生しました: {}", name, e);
-                }
-            }
-        }
-
-        Ok(external_ids)
     }
 }

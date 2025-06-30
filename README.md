@@ -4,12 +4,12 @@ Rust言語で開発されたLLMを活用した予定管理AIエージェント�
 
 ## 機能
 
-- 🤖 **自然言語処理**: LLMを使用して自然言語での予定管理
+- 🤖 **自然言語でのAI対話**: LLMを使用して自然言語での予定管理
 - 📅 **予定管理**: 予定の作成、更新、削除、検索
+- 🗓️ **Google Calendar連携**: Google Calendarとの双方向同期
 - 💾 **ローカルストレージ**: JSONファイルでの予定データ保存
 - 🔄 **バックアップ・復元**: 予定データのバックアップと復元
 - 📊 **統計情報**: 予定の統計情報表示
-- 🌐 **カレンダー連携**: Google Calendar等との連携（基盤実装済み）
 - 🎨 **カラフルなCLI**: 見やすいコマンドライン インターフェース
 
 ## インストール
@@ -17,7 +17,8 @@ Rust言語で開発されたLLMを活用した予定管理AIエージェント�
 ### 前提条件
 
 - Rust 1.70以上
-- OpenAI API キー（オプション、モックLLMも利用可能）
+- LLM API キー（Gemini API推奨、モックLLMも利用可能）
+- Google Calendar API設定（オプション、カレンダー連携機能を使用する場合）
 
 ### ビルド
 
@@ -74,7 +75,67 @@ cargo run -- export schedule_backup.json
 
 # 予定をインポート
 cargo run -- import schedule_backup.json
+
+# 統計を表示
+cargo run -- stats
 ```
+
+### Google Calendar連携コマンド
+
+```bash
+# Google Calendarで認証
+cargo run -- calendar auth
+
+# 今日のGoogle Calendarの予定を表示
+cargo run -- calendar today
+
+# 今週のGoogle Calendarの予定を表示
+cargo run -- calendar week
+
+# Google Calendarの情報を同期
+cargo run -- calendar sync
+
+# Google Calendarにイベントを作成
+cargo run -- calendar create "会議" --start "2024-01-15T10:00:00Z" --end "2024-01-15T11:00:00Z" --description "重要な会議" --location "会議室A"
+
+# 空き時間を検索（60分間の空き時間を7日先まで検索）
+cargo run -- calendar find-free 60 --days 7
+```
+
+### Google Calendar設定
+
+Google Calendar連携を使用するには、以下の手順が必要です：
+
+1. **Google Cloud Console設定**
+   - [Google Cloud Console](https://console.cloud.google.com/)でプロジェクトを作成
+   - Google Calendar APIを有効化
+   - OAuth 2.0認証情報を作成（デスクトップアプリケーション）
+   - `client_secret.json`ファイルをダウンロード
+
+2. **設定ファイル更新**
+   ```toml
+   [google_calendar]
+   client_secret_path = "client_secret.json"
+   token_cache_path = "token_cache.json"
+   calendar_id = "primary"
+   ```
+
+3. **初回認証**
+   ```bash
+   cargo run -- calendar auth
+   ```
+   
+   ブラウザが開き、Google認証が求められます。認証後、トークンが自動保存されます。
+
+### 統計表示
+
+予定の統計情報を表示します：
+
+```bash
+cargo run -- stats
+```
+
+詳細な設定方法については、設定ファイルのコメントを参照してください。
 
 ### 自然言語での操作例
 
@@ -93,13 +154,13 @@ cargo run -- import schedule_backup.json
 ### 環境変数
 
 ```bash
-# OpenAI API キー（LLM機能を使用する場合）
-export OPENAI_API_KEY="your-api-key-here"
+# Gemini API キー（LLM機能を使用する場合）
+export GEMINI_API_KEY="your-api-key-here"
 
-# カスタムOpenAI互換API（オプション）
-export OPENAI_BASE_URL="https://api.openai.com/v1"
+# カスタムGemini API URL（オプション）
+export GEMINI_BASE_URL="https://generativelanguage.googleapis.com/v1beta"
 
-# Google Calendar連携（将来実装）
+# Google Calendar連携
 export GOOGLE_CALENDAR_ACCESS_TOKEN="your-token"
 export GOOGLE_CALENDAR_ID="primary"
 ```
@@ -109,6 +170,35 @@ export GOOGLE_CALENDAR_ID="primary"
 予定データは以下の場所に保存されます：
 - Linux/macOS: `~/.schedule_ai_agent/schedule.json`
 - Windows: `%USERPROFILE%\.schedule_ai_agent\schedule.json`
+
+設定ファイルは以下の場所に保存されます：
+- Linux/macOS: `~/.schedule_ai_agent/config.toml`
+- Windows: `%USERPROFILE%\.schedule_ai_agent\config.toml`
+
+## 設定ファイル
+
+設定ファイルを初期化するには：
+
+```bash
+cargo run -- config init
+```
+
+設定ファイルの例：
+
+```toml
+[llm]
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+model = "gemini-2.5-flash"
+temperature = 0.7
+max_tokens = 1000
+gemini_api_key = "your-gemini-api-key"
+
+[app]
+data_dir = "~/.schedule_ai_agent"
+backup_count = 5
+auto_backup = true
+verbose = false
+```
 
 ## 開発
 
@@ -122,6 +212,7 @@ src/
 ├── scheduler.rs     # 予定管理コア機能
 ├── storage.rs       # ローカルストレージ
 ├── cli.rs          # コマンドライン インターフェース
+├── config.rs        # 設定管理
 └── calendar.rs      # カレンダー連携（基盤）
 ```
 
@@ -146,33 +237,41 @@ cargo test
 cargo test --test integration_tests
 ```
 
-## カレンダー連携
-
-### Google Calendar連携
-
-Google Calendar連携を有効にするには：
-
-1. Google Cloud Consoleでプロジェクトを作成
-2. Calendar APIを有効化
-3. OAuth 2.0認証情報を設定
-4. アクセストークンを取得
-5. 環境変数を設定
-
-```bash
-export GOOGLE_CALENDAR_ACCESS_TOKEN="your-access-token"
-export GOOGLE_CALENDAR_ID="primary"  # または特定のカレンダーID
-```
-
-### Notion Calendar連携
-
-Notion Calendar連携は将来実装予定です。基盤となるコードは既に含まれています。
-
 ## トラブルシューティング
 
 ### よくある問題
 
 1. **LLM APIエラー**
-   - API キーが正しく設定されているか確認
+   - `Date` (日付)
+   - `Status` (選択、オプション)
+   - `Priority` (選択、オプション)
+   - `Description` (リッチテキスト、オプション)
+   - `Location` (リッチテキスト、オプション)
+   - `Attendees` (マルチセレクト、オプション)
+   - `Tags` (マルチセレクト、オプション)
+
+4. **データベースIDを取得**
+   - データベースページで「共有」→「リンクをコピー」
+   - URLから32文字のIDを抽出
+   - 例：`https://www.notion.so/yourworkspace/database-id?v=view-id`
+
+5. **環境変数を設定**
+   ```bash
+   export NOTION_API_TOKEN="secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   export NOTION_DATABASE_ID="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ```
+
+6. **設定ファイルに追加（オプション）**
+   ```toml
+   [calendar.notion]
+   api_key = "secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   database_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ```
+
+7. **連携をテスト**
+   ```bash
+   cargo run -- notion test
+   - Gemini API キーが正しく設定されているか確認
    - `--mock-llm` フラグでモックLLMを使用
 
 2. **日時解析エラー**
@@ -200,12 +299,10 @@ MIT License
 
 ## 今後の予定
 
-- [ ] Google Calendar完全連携
-- [ ] Notion Calendar連携
-- [ ] Outlook Calendar連携
+- [ ] 外部カレンダー連携
 - [ ] リマインダー機能
 - [ ] 繰り返し予定
 - [ ] Web UI
 - [ ] モバイルアプリ連携
 - [ ] 音声入力対応
-- [ ] 多言語対応# saa
+- [ ] 多言語対応
