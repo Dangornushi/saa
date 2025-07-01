@@ -2,7 +2,8 @@ use crate::config::Config;
 use crate::models::{ActionType, EventData, LLMRequest, LLMResponse, MissingEventData, Priority};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use chrono_tz::Asia::Tokyo;
 use colored::Colorize;
 use serde_json::{Value, json};
 use std::env; // 追加
@@ -138,6 +139,8 @@ impl LLM for LLMClient {
                 response_text: question.to_string(),
                 missing_data: llm_response.missing_data,
                 updated_conversation: Some(updated_conversation),
+                start_time: None, // 開始時刻はまだ不明
+                end_time: None,   // 終了時刻はまだ不明
             });
         }
 
@@ -255,10 +258,10 @@ impl LLMClient {
             }
         }
 
-        let now = Utc::now();
+        let now_jst = Utc::now().with_timezone(&Tokyo);
         message.push_str(&format!(
-            "\n\n現在の日時: {}",
-            now.format("%Y-%m-%d %H:%M:%S UTC")
+            "\n\n現在の日時: {} (JST)",
+            now_jst.format("%Y-%m-%d %H:%M:%S")
         ));
 
         message
@@ -306,6 +309,33 @@ impl LLMClient {
             .unwrap_or("No response text provided")
             .to_string();
 
+        // 開始時間と終了時間をパース
+        let start_time = if let Some(data) = response_json.get("event_data") {
+            if let Some(start_time_str) = data["start_time"].as_str() {
+                match DateTime::parse_from_rfc3339(start_time_str) {
+                    Ok(dt) => Some(dt.with_timezone(&Utc)),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let end_time = if let Some(data) = response_json.get("event_data") {
+            if let Some(end_time_str) = data["end_time"].as_str() {
+                match DateTime::parse_from_rfc3339(end_time_str) {
+                    Ok(dt) => Some(dt.with_timezone(&Utc)),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // 会話履歴を更新
         let mut updated_conversation = request.conversation_history.clone().unwrap_or_else(|| {
             use crate::models::ConversationHistory;
@@ -324,6 +354,8 @@ impl LLMClient {
             response_text,
             missing_data,
             updated_conversation: Some(updated_conversation),
+            start_time,
+            end_time,
         })
     }
 
@@ -396,17 +428,16 @@ impl LLM for MockLLMClient {
         if input.contains("予定")
             && (input.contains("作成") || input.contains("追加") || input.contains("入れて"))
         {
+            let start_time = Utc::now();
+            let end_time = start_time + chrono::Duration::hours(1);
+            
             Ok(LLMResponse {
                 action: ActionType::CreateEvent,
                 event_data: Some(EventData {
                     title: Some("WEB会議".to_string()), // タイトルをWEB会議に固定
                     description: Some("LLMで解析された予定".to_string()),
-                    start_time: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()), // 仮の時刻
-                    end_time: Some(
-                        (Utc::now() + chrono::Duration::hours(1))
-                            .format("%Y-%m-%dT%H:%M:%SZ")
-                            .to_string(),
-                    ), // 仮の時刻
+                    start_time: Some(start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string()), // 仮の時刻
+                    end_time: Some(end_time.format("%Y-%m-%dT%H:%M:%SZ").to_string()), // 仮の時刻
                     location: None,
                     attendees: Vec::new(),
                     priority: Some(Priority::Medium),
@@ -415,6 +446,8 @@ impl LLM for MockLLMClient {
                 response_text: "新しい予定を作成しました。".to_string(),
                 missing_data: None,
                 updated_conversation: None,
+                start_time: Some(start_time),
+                end_time: Some(end_time),
             })
         } else if input.contains("一覧") || input.contains("リスト") {
             Ok(LLMResponse {
@@ -423,6 +456,8 @@ impl LLM for MockLLMClient {
                 response_text: "予定一覧を表示します。".to_string(),
                 missing_data: None,
                 updated_conversation: None,
+                start_time: None,
+                end_time: None,
             })
         } else {
             Ok(LLMResponse {
@@ -431,6 +466,8 @@ impl LLM for MockLLMClient {
                 response_text: "申し訳ございませんが、その要求を理解できませんでした。".to_string(),
                 missing_data: None,
                 updated_conversation: None,
+                start_time: None,
+                end_time: None,
             })
         }
     }

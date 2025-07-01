@@ -4,10 +4,10 @@ use std::sync::Arc;
 use crate::config::{Config, ConfigManager};
 use crate::llm::LLM;
 use crate::llm::{LLMClient, MockLLMClient};
-use crate::models::{ActionType, LLMRequest, LLMResponse, Priority, Schedule};
+use crate::models::{ActionType, LLMRequest, Priority, Schedule};
 use crate::storage::Storage;
 use anyhow::Result;
-use chrono::Datelike;
+use chrono_tz::Asia::Tokyo;
 use clap::{App, Arg, ArgMatches, SubCommand};
 use colored::*;
 use dialoguer::{Confirm, Select};
@@ -567,236 +567,6 @@ impl CliApp {
         }
     }
 
-    async fn interactive_mode(&mut self) -> Result<()> {
-        println!("🤖 AI予定管理アシスタントへようこそ！");
-        println!("会話履歴を記録して、スムーズな対話を提供します。");
-        println!("");
-        println!("📋 利用可能なコマンド:");
-        println!("  • 'history' - 会話履歴を表示");
-        println!("  • 'save' - 会話ログをファイルに保存");
-        println!("  • 'save <ファイル名>' - 指定したファイル名で保存");
-        println!("  • 'clear' - 会話履歴をクリア");
-        println!("  • 'exit' または 'quit' - 終了（会話ログを表示）");
-        println!("");
-
-        /*
-            if let Err(e) = self.process_natural_language_input(input).await {
-                println!("{}: {}", "エラー".red(), e);
-            }*/
-        let config_manager = ConfigManager::new()?;
-        let config = config_manager.load_config()?;
-
-        let llm: Arc<dyn LLM> = if self.use_mock_llm {
-            Arc::new(MockLLMClient::new())
-        } else {
-            Arc::new(LLMClient::from_config(&config)?)
-        };
-
-        // LLMとの接続テスト
-        llm.test_connection().await?;
-
-        let mut scheduler = Scheduler::new(llm)?;
-
-        loop {
-            print!("💬 あなた: ");
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim();
-
-            if input.is_empty() {
-                continue;
-            }
-
-            if input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit") {
-                // 会話終了時に会話ログを表示
-                println!("\n📋 === 会話ログ ===");
-                println!("{}", scheduler.get_conversation_summary());
-                println!("\n👋 さようなら！");
-                break;
-            }
-
-            if input.eq_ignore_ascii_case("history") {
-                println!("{}", scheduler.get_conversation_summary());
-                continue;
-            }
-
-            if input.eq_ignore_ascii_case("save") || input.starts_with("save ") {
-                let file_path = if input.starts_with("save ") {
-                    Some(input.strip_prefix("save ").unwrap())
-                } else {
-                    None
-                };
-                
-                match scheduler.save_conversation_log_to_file(file_path) {
-                    Ok(saved_path) => {
-                        println!("💾 会話ログを保存しました: {}", saved_path);
-                    }
-                    Err(e) => {
-                        eprintln!("❌ ログ保存エラー: {}", e);
-                    }
-                }
-                continue;
-            }
-
-            if input.eq_ignore_ascii_case("clear") {
-                scheduler.clear_conversation_history()?;
-                println!("🗑️ 会話履歴をクリアしました");
-                continue;
-            }
-
-
-            match scheduler.process_user_input(input.to_string()).await {
-                Ok(response) => {
-                    println!("🤖 アシスタント: {}", response);
-                }
-                Err(e) => {
-                    eprintln!("❌ エラー: {}", e);
-                }
-            }
-            
-            println!(); // 空行を追加
-        }
-        return Ok(());
-
-    }
-
-    async fn process_natural_language_input(&mut self, input: &str) -> Result<()> {
-        let request = LLMRequest {
-            user_input: input.to_string(),
-            context: Some(self.get_context_info()),
-            conversation_history: None, // CLIでは会話履歴を管理しない（Schedulerで管理）
-        };
-
-        let response = if self.use_mock_llm {
-            self.mock_llm_client.process_request(request).await?
-        } else if let Some(ref client) = self.llm_client {
-            client.process_request(request).await?
-        } else {
-            return Err(anyhow::anyhow!("LLMクライアントが利用できません"));
-        };
-
-        match response.action {
-            ActionType::CreateEvent => {
-                if let Some(_missing_data) = response.missing_data {
-                    // LLMが不足情報を返した場合
-                    println!("{}", response.response_text.yellow());
-                    // ここで ask_followup_question を呼び出す代わりに、
-                    // LLMResponseのresponse_textに質問内容が設定されているので、それを表示する
-                } else if let Some(event_data) = response.event_data {
-                    // 予定作成に必要な情報が揃っている場合
-                    if let Some(ref mut google_client) = self.google_calendar {
-                        // Google Calendarに作成
-                        match google_client
-                            .create_event_from_event_data(
-                                &event_data.title.clone().unwrap_or_default(),
-                                &event_data.start_time.clone().unwrap_or_default(),
-                                &event_data.end_time.clone().unwrap_or_default(),
-                                event_data.description.as_deref(),
-                                event_data.location.as_deref(),
-                            )
-                            .await
-                        {
-                            Ok(event_id) => {
-                                self.print_success(&format!(
-                                    "Google Calendarに予定を作成しました: {}",
-                                    event_id
-                                ));
-                                self.save_schedule()?;
-                            }
-                            Err(e) => {
-                                self.print_error("Google Calendar作成エラー", &e);
-                                return Err(anyhow::anyhow!("予定の作成に失敗しました: {}", e));
-                            }
-                        }
-                    } else {
-                        // ローカルスケジュールに作成
-                        match self.create_local_event(event_data) {
-                            Ok(event_id) => {
-                                self.print_success(&response.response_text);
-                                println!("イベントID: {}", event_id.to_string().cyan());
-                                self.save_schedule()?;
-                            }
-                            Err(e) => {
-                                self.print_error("予定作成エラー", &e);
-                            }
-                        }
-                    }
-                } else {
-                    // ここには到達しないはずだが、念のため
-                    println!("{}", "予定データが不完全です。".red());
-                }
-            }
-            ActionType::ListEvents => {
-                println!("{}", response.response_text);
-                
-            }
-            ActionType::SearchEvents => {
-                println!("SearchEvents: {:?}", response.event_data);
-                if let Some(ref query) = response.event_data.as_ref().and_then(|d| d.title.as_ref())
-                {
-                    // Google Calendar検索
-                    println!(
-                        "\n{}",
-                        format!("=== Google Calendar検索: '{}' ===", query)
-                            .bold()
-                            .blue()
-                    );
-                } else {
-                    // クエリが不明な場合は全件表示
-                    if let Some(service) = &self.calendar_service {
-                        match service.get_today_events().await {
-                            Ok(events) => {
-                                self.display_calendar_events(&events, "📅 Google Calendarの予定");
-                            }
-                            Err(e) => {
-                                self.print_error("Google Calendar取得エラー", &e);
-                            }
-                        }
-                    }
-                }
-            }
-            ActionType::GetEventDetails => {
-                println!("OK: {}", response.response_text);
-                /*
-                if let Some(event_id) = response.event_data.and_then(|d| d.id) {
-                    // Google Calendarからイベント詳細を取得
-                    if let Some(service) = &self.calendar_service {
-                        match service.get_event_details("primary", &event_id).await {
-                            Ok(event) => {
-                                println!("{}: {}", "イベント詳細".bold().blue(), event.summary);
-                                println!("開始: {}", event.start.date_time.unwrap_or_default());
-                                println!("終了: {}", event.end.date_time.unwrap_or_default());
-                                if let Some(location) = event.location {
-                                    println!("場所: {}", location);
-                                }
-                                if let Some(description) = event.description {
-                                    println!("説明: {}", description);
-                                }
-                            }
-                            Err(e) => {
-                                self.print_error("イベント詳細取得エラー", &e);
-                            }
-                        }
-                    } else {
-                        self.print_warning("Google Calendarが未認証です。");
-                    }
-                } else {
-                    self.print_warning("イベントIDが指定されていません。");
-                }*/
-            }
-            ActionType::GeneralResponse => {
-                println!("{}", response.response_text);
-            }
-            _ => {
-                println!("その他のアクション: {}", response.response_text);
-            }
-        }
-
-        Ok(())
-    }
-
     // カレンダー関連のコマンド実装
     /// Google Calendarで認証
     async fn calendar_auth_command(&mut self) -> Result<()> {
@@ -955,15 +725,15 @@ impl CliApp {
         self.ensure_calendar_auth().await?;
 
         if let Some(service) = &self.calendar_service {
-            let now = chrono::Utc::now();
-            let end_time = now + chrono::Duration::days(days_ahead);
+            let now_jst = chrono::Utc::now().with_timezone(&Tokyo);
+            let end_time_jst = now_jst + chrono::Duration::days(days_ahead);
 
             println!(
                 "{}",
                 format!("🔍 {}分間の空き時間を検索中...", duration_minutes).blue()
             );
             match service
-                .find_free_time(now, end_time, duration_minutes)
+                .find_free_time(now_jst.with_timezone(&chrono::Utc), end_time_jst.with_timezone(&chrono::Utc), duration_minutes)
                 .await
             {
                 Ok(free_slots) => {
@@ -972,11 +742,13 @@ impl CliApp {
                     } else {
                         println!("{}", "=== 空き時間 ===".bold().green());
                         for (i, (start, end)) in free_slots.iter().enumerate() {
+                            let start_jst = start.with_timezone(&Tokyo);
+                            let end_jst = end.with_timezone(&Tokyo);
                             println!(
                                 "{}. {} ～ {} ({}分間)",
                                 i + 1,
-                                start.format("%Y-%m-%d %H:%M"),
-                                end.format("%Y-%m-%d %H:%M"),
+                                start_jst.format("%Y-%m-%d %H:%M"),
+                                end_jst.format("%Y-%m-%d %H:%M"),
                                 (*end - *start).num_minutes()
                             );
                         }

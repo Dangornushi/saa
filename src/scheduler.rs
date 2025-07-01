@@ -1,16 +1,16 @@
 use crate::llm::LLM;
 use crate::models::{
-    ActionType, ConversationHistory, Event, EventData, LLMRequest, LLMResponse, Schedule, SchedulerError
+    ActionType, ConversationHistory, EventData, LLMRequest, LLMResponse, SchedulerError
 };
 use crate::storage::Storage;
 use schedule_ai_agent::GoogleCalendarClient;
 use anyhow::Result;
-use chrono::{DateTime, Utc, Datelike};
+use chrono::{DateTime, Utc};
+use chrono_tz::Asia::Tokyo;
 use colored::Colorize;
 use std::sync::Arc;
 
 pub struct Scheduler {
-    schedule: Schedule,
     conversation_history: ConversationHistory,
     llm: Arc<dyn LLM>,
     storage: Storage,
@@ -20,11 +20,9 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new(llm: Arc<dyn LLM>) -> Result<Self> {
         let storage = Storage::new()?;
-        let schedule = storage.load_schedule()?;
         let conversation_history = storage.load_conversation_history()?;
 
         Ok(Self {
-            schedule,
             conversation_history,
             llm,
             storage,
@@ -33,31 +31,14 @@ impl Scheduler {
     }
 
 
-    /// 成功メッセージを表示
-    fn print_success(&self, message: &str) {
-        println!("{}", message.green());
-    }
-
-    /// エラーメッセージを表示
-    fn print_error(&self, prefix: &str, error: &dyn std::fmt::Display) {
-        println!("{}: {}", prefix.red(), error);
-    }
-
-    /// 警告メッセージを表示
-    fn print_warning(&self, message: &str) {
-        println!("{}", message.yellow());
-    }
-
     /// 日時解析のヘルパー関
     pub async fn new_with_calendar(llm: Arc<dyn LLM>, client_secret_path: &str, token_cache_path: &str) -> Result<Self> {
         let storage = Storage::new()?;
-        let schedule = storage.load_schedule()?;
         let conversation_history = storage.load_conversation_history()?;
         
         let calendar_client = GoogleCalendarClient::new(client_secret_path, token_cache_path).await?;
 
         Ok(Self {
-            schedule,
             conversation_history,
             llm,
             storage,
@@ -92,23 +73,19 @@ impl Scheduler {
                 }
             }
             ActionType::UpdateEvent => {
-                if let Some(event_data) = response.event_data {
-                    self.update_event_from_data(event_data).await
-                } else {
-                    Ok("更新するイベントのデータが不足しています。".to_string())
-                }
+                Ok("予定の更新は現在サポートされていません。予定を削除してから新しく作成してください。".to_string())
             }
             ActionType::DeleteEvent => {
-                self.delete_event_from_input(&user_input).await
+                Ok("予定の削除は現在サポートされていません。Google Calendarから直接削除してください。".to_string())
             }
             ActionType::ListEvents => {
                 self.get_list_events(&response).await
             }
             ActionType::SearchEvents => {
-                self.search_events(&user_input)
+                Ok("ローカルスケジュールは削除されました。Google Calendarから予定を検索してください。".to_string())
             }
             ActionType::GetEventDetails => {
-                self.get_event_details(&user_input)
+                Ok("ローカルスケジュールは削除されました。Google Calendarから予定の詳細を確認してください。".to_string())
             }
             ActionType::GeneralResponse => {
                 Ok(response.response_text.clone())
@@ -194,33 +171,11 @@ impl Scheduler {
     fn create_context(&self) -> String {
         let mut context = String::new();
         
-        // 現在のスケジュール概要
-        if !self.schedule.events.is_empty() {
-            context.push_str(&format!(
-                "現在の予定数: {}\n",
-                self.schedule.events.len()
-            ));
-            
-            // 今日と明日の予定
-            let now = Utc::now();
-            let tomorrow = now + chrono::Duration::days(1);
-            
-            let today_events = self.schedule.get_events_by_date_range(
-                now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc(),
-                now.date_naive().and_hms_opt(23, 59, 59).unwrap().and_utc(),
-            );
-            
-            let tomorrow_events = self.schedule.get_events_by_date_range(
-                tomorrow.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc(),
-                tomorrow.date_naive().and_hms_opt(23, 59, 59).unwrap().and_utc(),
-            );
-            
-            if !today_events.is_empty() {
-                context.push_str(&format!("今日の予定: {} 件\n", today_events.len()));
-            }
-            if !tomorrow_events.is_empty() {
-                context.push_str(&format!("明日の予定: {} 件\n", tomorrow_events.len()));
-            }
+        // Google Calendarが設定されている場合の情報を追加
+        if self.calendar_client.is_some() {
+            context.push_str("Google Calendar連携が有効です。\n");
+        } else {
+            context.push_str("Google Calendar連携は無効です。\n");
         }
         
         context
@@ -244,31 +199,30 @@ impl Scheduler {
                     self.display_calendar_events(&events, &query_range_str);
                 }
                 Err(e) => {
-                    self.print_error("Google Calendar取得エラー", &e);
+                    println!("{}: {}", "Google Calendar取得エラー".red(), e);
                 }
             }
         } else {
-            self.print_warning("Google Calendarが設定されていません。");
+            println!("{}", "Google Calendarが設定されていません。".yellow());
         }
 
         Ok("OK".to_string())
     }
-       // カレンダー関連のコマンド実装
-    /// Google Calendarで認証
+    // カレンダー関連のコマンド実装
     
     /// Google Calendarイベントを表示する共通メソッド
     fn display_calendar_events(&self, events: &google_calendar3::api::Events, title: &str) {
         println!("{}", title.bold().blue());
         if let Some(items) = &events.items {
             if items.is_empty() {
-                self.print_warning("予定はありません。");
+                println!("{}", "予定はありません。".yellow());
             } else {
                 for (i, event) in items.iter().enumerate() {
                     self.display_google_calendar_event(event, i + 1);
                 }
             }
         } else {
-            self.print_warning("予定はありません。");
+            println!("{}", "予定はありません。".yellow());
         }
     }
 
@@ -282,7 +236,8 @@ impl Scheduler {
 
         if let Some(start) = &event.start {
             if let Some(date_time) = &start.date_time {
-                println!("🕐 開始時刻: {}", date_time.to_string().blue());
+                let start_jst = date_time.with_timezone(&Tokyo);
+                println!("🕐 開始時刻: {}", start_jst.format("%Y-%m-%d %H:%M").to_string().blue());
             } else if let Some(date) = &start.date {
                 println!("📅 開始日: {}", date.to_string().blue());
             }
@@ -290,7 +245,8 @@ impl Scheduler {
 
         if let Some(end) = &event.end {
             if let Some(date_time) = &end.date_time {
-                println!("🕐 終了時刻: {}", date_time.to_string().blue());
+                let end_jst = date_time.with_timezone(&Tokyo);
+                println!("🕐 終了時刻: {}", end_jst.format("%Y-%m-%d %H:%M").to_string().blue());
             } else if let Some(date) = &end.date {
                 println!("📅 終了日: {}", date.to_string().blue());
             }
@@ -305,33 +261,16 @@ impl Scheduler {
         }
     }
 
-
     /// クエリの時間範囲を取得
     fn get_query_time_range(&self, response: &LLMResponse) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
-        let now = chrono::Utc::now();
         
         // LLMのレスポンスから時間範囲を判定
-        let response_text = response.response_text.to_lowercase();
-        
-        if response_text.contains("今日") || response_text.contains("today") {
-            let start_of_day = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let end_of_day = now.date_naive().and_hms_opt(23, 59, 59).unwrap().and_utc();
-            (start_of_day, end_of_day)
-        } else if response_text.contains("明日") || response_text.contains("tomorrow") {
-            let tomorrow = now + chrono::Duration::days(1);
-            let start_of_day = tomorrow.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let end_of_day = tomorrow.date_naive().and_hms_opt(23, 59, 59).unwrap().and_utc();
-            (start_of_day, end_of_day)
-        } else if response_text.contains("今週") || response_text.contains("this week") {
-            let days_from_monday = now.weekday().num_days_from_monday();
-            let start_of_week = (now - chrono::Duration::days(days_from_monday as i64))
-                .date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let end_of_week = start_of_week + chrono::Duration::days(7);
-            (start_of_week, end_of_week)
-        } else {
-            // デフォルトは今日から1週間
-            let end_time = now + chrono::Duration::days(7);
-            (now, end_time)
+        if let (Some(start), Some(end)) = (response.start_time, response.end_time) {
+            return (start, end);
+        }
+        else {
+            println!("時間範囲が指定されていません。");
+            return (Utc::now(), Utc::now());
         }
     }
 
@@ -349,15 +288,7 @@ impl Scheduler {
         let start_time = self.parse_datetime(start_time_str)?;
         let end_time = self.parse_datetime(end_time_str)?;
 
-        // 重複チェック
-        if self.schedule.has_conflict(&start_time, &end_time) {
-            return Err(SchedulerError::Conflict(
-                "指定された時間帯に既に予定があります".to_string(),
-            ).into());
-        }
-
-        // Google Calendarにもイベントを作成する
-        let mut google_event_id = None;
+        // Google Calendarにイベントを作成する
         if let Some(ref calendar_client) = self.calendar_client {
             match calendar_client.create_event_from_event_data(
                 title,
@@ -366,236 +297,33 @@ impl Scheduler {
                 event_data.description.as_deref(),
                 event_data.location.as_deref(),
             ).await {
-                Ok(id) => {
-                    google_event_id = Some(id);
+                Ok(_id) => {
                     println!("Google Calendarにイベントを作成しました: {}", title);
                 }
                 Err(e) => {
                     println!("Google Calendarへの作成に失敗しました: {}", e);
-                    // Google Calendarでの作成に失敗してもローカルでは続行
+                    return Err(e.into());
                 }
             }
+        } else {
+            return Err(anyhow::anyhow!("Google Calendarクライアントが設定されていません"));
         }
-
-        let mut event = Event::new(title.clone(), start_time, end_time);
-
-        if let Some(description) = event_data.description {
-            event = event.with_description(description);
-        }
-
-        if let Some(location) = event_data.location {
-            event = event.with_location(location);
-        }
-
-        if let Some(priority) = event_data.priority {
-            event = event.with_priority(priority);
-        }
-
-        for attendee in event_data.attendees {
-            event = event.add_attendee(attendee);
-        }
-
-        // Google Calendar IDがある場合は設定
-        let has_google_calendar = google_event_id.is_some();
-        if let Some(_google_id) = google_event_id {
-            // EventにGoogle Calendar IDを保存する仕組みは後で実装
-            // 現在は単純にローカルに保存
-        }
-
-        let event_id = event.id;
-        self.schedule.add_event(event);
-        self.storage.save_schedule(&self.schedule)?;
 
         // 会話履歴にイベント作成の記録を追加
-        let success_message = if has_google_calendar {
-            format!("予定「{}」をローカルとGoogle Calendarに作成しました", title)
-        } else {
-            format!("予定「{}」をローカルに作成しました", title)
-        };
+        let success_message = format!("予定「{}」をGoogle Calendarに作成しました", title);
         
         self.conversation_history.add_assistant_message(
             success_message.clone(),
-            Some(event_id),
+            Some(uuid::Uuid::new_v4()),
         );
         self.save_conversation_history()?;
 
         Ok(format!(
             "{}。\n開始: {}\n終了: {}",
             success_message,
-            start_time.format("%Y-%m-%d %H:%M"),
-            end_time.format("%Y-%m-%d %H:%M")
+            start_time.with_timezone(&Tokyo).format("%Y-%m-%d %H:%M"),
+            end_time.with_timezone(&Tokyo).format("%Y-%m-%d %H:%M")
         ))
-    }
-
-    async fn update_event_from_data(&mut self, event_data: EventData) -> Result<String> {
-        // 更新対象のイベントを特定する必要がある
-        // この実装では、タイトルで検索して最初に見つかったイベントを更新する
-        let title_to_search = event_data.title.as_deref().unwrap_or("");
-        
-        let event_id = self.schedule.events
-            .iter()
-            .find(|e| e.title.contains(title_to_search))
-            .map(|e| e.id)
-            .ok_or_else(|| SchedulerError::NotFound("更新対象の予定が見つかりません".to_string()))?;
-
-        let event_title = {
-            let event = self.schedule.get_event_mut(event_id)
-                .ok_or_else(|| SchedulerError::NotFound("更新対象の予定が見つかりません".to_string()))?;
-            
-            // クロージャ内でselfを使わないように、parse_datetimeをローカル関数として定義
-            let parse_fn = |s: &str| -> Result<DateTime<Utc>, SchedulerError> {
-                // ISO 8601形式での解析を試行
-                match DateTime::parse_from_rfc3339(s) {
-                    std::result::Result::Ok(dt) => return std::result::Result::Ok(dt.with_timezone(&Utc)),
-                    _ => {}
-                }
-
-                // その他の形式も試行
-                match DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.fZ") {
-                    std::result::Result::Ok(dt) => return std::result::Result::Ok(dt.with_timezone(&Utc)),
-                    _ => {}
-                }
-
-                match DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ") {
-                    std::result::Result::Ok(dt) => return std::result::Result::Ok(dt.with_timezone(&Utc)),
-                    _ => {}
-                }
-
-                std::result::Result::Err(SchedulerError::ParseError(format!(
-                    "日時の解析に失敗しました: {}",
-                    s
-                )))
-            };
-            
-            event.apply_event_data(event_data, parse_fn)?;
-            event.title.clone()
-        };
-
-        self.storage.save_schedule(&self.schedule)?;
-
-        self.conversation_history.add_assistant_message(
-            format!("予定「{}」を更新しました", event_title),
-            Some(event_id),
-        );
-        self.save_conversation_history()?;
-
-        Ok(format!("予定「{}」を更新しました", event_title))
-    }
-
-    async fn delete_event_from_input(&mut self, input: &str) -> Result<String> {
-        // 入力からイベントを特定して削除
-        // 簡単な実装：タイトルが含まれているイベントを検索
-        let events_to_delete: Vec<_> = self.schedule.events
-            .iter()
-            .filter(|e| input.contains(&e.title))
-            .map(|e| (e.id, e.title.clone()))
-            .collect();
-
-        if events_to_delete.is_empty() {
-            return Ok("削除対象の予定が見つかりません".to_string());
-        }
-
-        let mut deleted_titles = Vec::new();
-        for (event_id, title) in events_to_delete {
-            if self.schedule.remove_event(event_id) {
-                deleted_titles.push(title.clone());
-                self.conversation_history.add_assistant_message(
-                    format!("予定「{}」を削除しました", title),
-                    Some(event_id),
-                );
-            }
-        }
-
-        if !deleted_titles.is_empty() {
-            self.storage.save_schedule(&self.schedule)?;
-            self.save_conversation_history()?;
-            Ok(format!("以下の予定を削除しました: {}", deleted_titles.join(", ")))
-        } else {
-            Ok("予定の削除に失敗しました".to_string())
-        }
-    }
-
-    fn list_events(&self) -> String {
-        if self.schedule.events.is_empty() {
-            return "予定はありません。".to_string();
-        }
-
-        let mut events = self.schedule.events.clone();
-        events.sort_by(|a, b| a.start_time.cmp(&b.start_time));
-
-        let events_str = events
-            .iter()
-            .map(|e| {
-                format!(
-                    "• {} ({}〜{})",
-                    e.title,
-                    e.start_time.format("%m/%d %H:%M"),
-                    e.end_time.format("%H:%M")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        format!("予定一覧 ({} 件):\n{}", events.len(), events_str)
-    }
-
-    fn search_events(&self, query: &str) -> Result<String> {
-        let matching_events: Vec<_> = self.schedule.events
-            .iter()
-            .filter(|e| {
-                e.title.to_lowercase().contains(&query.to_lowercase()) ||
-                e.description.as_ref().map_or(false, |d| d.to_lowercase().contains(&query.to_lowercase()))
-            })
-            .collect();
-
-        if matching_events.is_empty() {
-            Ok(format!("「{}」に関連する予定は見つかりませんでした", query))
-        } else {
-            let events_str = matching_events
-                .iter()
-                .map(|e| {
-                    format!(
-                        "• {} ({}〜{})",
-                        e.title,
-                        e.start_time.format("%m/%d %H:%M"),
-                        e.end_time.format("%H:%M")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            Ok(format!("「{}」の検索結果 ({} 件):\n{}", query, matching_events.len(), events_str))
-        }
-    }
-
-    fn get_event_details(&self, query: &str) -> Result<String> {
-        let event = self.schedule.events
-            .iter()
-            .find(|e| e.title.to_lowercase().contains(&query.to_lowercase()))
-            .ok_or_else(|| SchedulerError::NotFound("指定された予定が見つかりません".to_string()))?;
-
-        let mut details = format!(
-            "予定の詳細:\n📅 タイトル: {}\n⏰ 開始: {}\n⏰ 終了: {}\n🎯 優先度: {:?}\n📊 状態: {:?}",
-            event.title,
-            event.start_time.format("%Y年%m月%d日 %H:%M"),
-            event.end_time.format("%Y年%m月%d日 %H:%M"),
-            event.priority,
-            event.status
-        );
-
-        if let Some(description) = &event.description {
-            details.push_str(&format!("\n📝 説明: {}", description));
-        }
-
-        if let Some(location) = &event.location {
-            details.push_str(&format!("\n📍 場所: {}", location));
-        }
-
-        if !event.attendees.is_empty() {
-            details.push_str(&format!("\n👥 参加者: {}", event.attendees.join(", ")));
-        }
-
-        Ok(details)
     }
 
     fn parse_datetime(&self, datetime_str: &str) -> Result<DateTime<Utc>, SchedulerError> {
@@ -674,53 +402,21 @@ impl Scheduler {
             let events = calendar_client.get_primary_events(50).await?;
             
             if let Some(google_events) = events.items {
-                let mut sync_count = 0;
-                let mut sync_messages = Vec::new();
+                let sync_messages: Vec<String> = google_events
+                    .iter()
+                    .filter_map(|google_event| {
+                        google_event.summary.as_ref().map(|summary| format!("• {}", summary))
+                    })
+                    .collect();
 
-                for google_event in google_events {
-                    if let (Some(summary), Some(start), Some(end)) = (
-                        google_event.summary,
-                        google_event.start.and_then(|s| s.date_time),
-                        google_event.end.and_then(|e| e.date_time),
-                    ) {
-                        // Google Calendar の日時形式をパース
-                        let start_utc = start.with_timezone(&Utc);
-                        let end_utc = end.with_timezone(&Utc);
-
-                        // 既存のイベントとの重複チェック（タイトルと時刻で判定）
-                        let existing = self.schedule.events.iter().any(|e| {
-                            e.title == summary && 
-                            e.start_time == start_utc && 
-                            e.end_time == end_utc
-                        });
-
-                        if !existing {
-                            let mut event = Event::new(summary.clone(), start_utc, end_utc);
-                            
-                            if let Some(description) = google_event.description {
-                                event = event.with_description(description);
-                            }
-                            
-                            if let Some(location) = google_event.location {
-                                event = event.with_location(location);
-                            }
-
-                            self.schedule.add_event(event);
-                            sync_count += 1;
-                            sync_messages.push(format!("• {}", summary));
-                        }
-                    }
-                }
-
-                if sync_count > 0 {
-                    self.storage.save_schedule(&self.schedule)?;
+                if !sync_messages.is_empty() {
                     Ok(format!(
-                        "Google Calendarから {} 件の新しい予定を同期しました:\n{}",
-                        sync_count,
+                        "Google Calendarから {} 件の予定を確認しました:\n{}",
+                        sync_messages.len(),
                         sync_messages.join("\n")
                     ))
                 } else {
-                    Ok("Google Calendarとの同期が完了しました。新しい予定はありませんでした。".to_string())
+                    Ok("Google Calendarに予定が見つかりませんでした。".to_string())
                 }
             } else {
                 Ok("Google Calendarに予定が見つかりませんでした。".to_string())

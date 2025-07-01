@@ -285,13 +285,13 @@ impl GoogleCalendarClient {
         
         event.start = Some(EventDateTime {
             date_time: Some(start_time),
-            time_zone: Some("UTC".to_string()),
+            time_zone: Some("Asia/Tokyo".to_string()),
             ..Default::default()
         });
         
         event.end = Some(EventDateTime {
             date_time: Some(end_time),
-            time_zone: Some("UTC".to_string()),
+            time_zone: Some("Asia/Tokyo".to_string()),
             ..Default::default()
         });
 

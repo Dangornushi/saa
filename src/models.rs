@@ -50,9 +50,11 @@ pub struct LLMRequest {
 pub struct LLMResponse {
     pub action: ActionType,
     pub event_data: Option<EventData>,
-    pub response_text: String,
+    pub response_text: String, // AIの発言
     pub missing_data: Option<MissingEventData>, // 追加
-    pub updated_conversation: Option<ConversationHistory>,
+    pub updated_conversation: Option<ConversationHistory>, // 更新された会話履歴
+    pub start_time: Option<DateTime<Utc>>, // 開始
+    pub end_time: Option<DateTime<Utc>>,     // 終了
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -1,5 +1,6 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, Utc, Duration, TimeZone, Datelike};
+use chrono_tz::Asia::Tokyo;
 use schedule_ai_agent::GoogleCalendarClient;
 use google_calendar3::api::{Event, Events};
 
@@ -17,9 +18,15 @@ impl CalendarService {
 
     /// 今日の予定を取得する
     pub async fn get_today_events(&self) -> Result<Events> {
-        let now = Utc::now();
-        let start_of_day = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-        let end_of_day = now.date_naive().and_hms_opt(23, 59, 59).unwrap().and_utc();
+        let now_jst = Utc::now().with_timezone(&Tokyo);
+        let start_of_day = Tokyo.with_ymd_and_hms(now_jst.year(), now_jst.month(), now_jst.day(), 0, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let end_of_day = Tokyo.with_ymd_and_hms(now_jst.year(), now_jst.month(), now_jst.day(), 23, 59, 59)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
         
         self.client.get_events_in_range(
             "primary",
@@ -31,13 +38,13 @@ impl CalendarService {
 
     /// 今週の予定を取得する
     pub async fn get_week_events(&self) -> Result<Events> {
-        let now = Utc::now();
-        let week_later = now + Duration::weeks(1);
+        let now_jst = Utc::now().with_timezone(&Tokyo);
+        let week_later_jst = now_jst + Duration::weeks(1);
         
         self.client.get_events_in_range(
             "primary",
-            now,
-            week_later,
+            now_jst.with_timezone(&Utc),
+            week_later_jst.with_timezone(&Utc),
             100
         ).await
     }
