@@ -63,10 +63,8 @@ impl LLM for LLMClient {
     async fn process_request(&self, request: LLMRequest) -> Result<LLMResponse> {
         let system_prompt = self.create_system_prompt();
         let user_message = self.create_user_message(&request);
-        println!("user message: {}", user_message);
 
         let client = reqwest::Client::new();
-        println!("{}", "LLMクライアントを使用しています...".dimmed());
         let request_url = format!(
             "{}/models/{}:generateContent?key={}",
             self.base_url, self.model, self.api_key
@@ -96,10 +94,8 @@ impl LLM for LLMClient {
             .send()
             .await?
             .error_for_status()?;
-        println!("Response status: {}", response.status());
 
         let response_json: Value = response.json().await?;
-        println!("Response JSON: {:?}", response_json);
 
         let content = response_json["candidates"][0]["content"]["parts"][0]["text"]
             .as_str()
@@ -172,6 +168,9 @@ impl LLMClient {
     fn create_system_prompt(&self) -> String {
         r#"
 あなたは予定管理AIエージェントです。ユーザーの自然言語入力を解析して、適切なアクションを決定してください。
+日時の解析では、相対的な表現（明日、来週など）も適切に処理してください。
+現在の日時を基準として計算してください。
+必要な情報が不足している場合は、`missing_data` フィールドに不足している情報の種類（"Title", "StartTime", "EndTime", "All"）を設定してください。また、対応するアクションが実装されていない場合はその旨を伝えてください。
 
 可能なアクション:
 - CREATE_EVENT: 新しい予定を作成
@@ -182,7 +181,7 @@ impl LLMClient {
 - SEARCH_EVENTS: 予定をタイトル名を基準に検索
 - GENERAL_RESPONSE: 一般的な応答
 
-応答は以下のJSON形式で返してください。必要な情報が不足している場合は、`missing_data` フィールドに不足している情報の種類（"Title", "StartTime", "EndTime", "All"）を設定してください。
+応答は以下のJSON形式で返してください。
 
 ```json
 {
@@ -236,9 +235,6 @@ impl LLMClient {
     "missing_data": "Title"
 }
 ```
-
-日時の解析では、相対的な表現（明日、来週など）も適切に処理してください。
-現在の日時を基準として計算してください。
 "#.to_string()
     }
 
@@ -281,7 +277,12 @@ impl LLMClient {
 
         // JSON形式での応答を期待
         let response_json: Value = serde_json::from_str(content)
-            .map_err(|e| anyhow!("Failed to parse LLM response: {}", e))?;
+            .map_err(|e| anyhow!("Failed to parse LLM response: {}\nResponse: {}", e, content))?;
+
+        println!(
+            "LLM Response: {}",
+            response_json.to_string().yellow()
+        );
 
         let action_str = response_json["action"]
             .as_str()
@@ -312,10 +313,7 @@ impl LLMClient {
         // 開始時間と終了時間をパース
         let start_time = if let Some(data) = response_json.get("event_data") {
             if let Some(start_time_str) = data["start_time"].as_str() {
-                match DateTime::parse_from_rfc3339(start_time_str) {
-                    Ok(dt) => Some(dt.with_timezone(&Utc)),
-                    Err(_) => None,
-                }
+                self.parse_datetime_with_jst_fallback(start_time_str)
             } else {
                 None
             }
@@ -325,10 +323,7 @@ impl LLMClient {
 
         let end_time = if let Some(data) = response_json.get("event_data") {
             if let Some(end_time_str) = data["end_time"].as_str() {
-                match DateTime::parse_from_rfc3339(end_time_str) {
-                    Ok(dt) => Some(dt.with_timezone(&Utc)),
-                    Err(_) => None,
-                }
+                self.parse_datetime_with_jst_fallback(end_time_str)
             } else {
                 None
             }
@@ -398,6 +393,7 @@ impl LLMClient {
         };
 
         Ok(EventData {
+            id: None,
             title,
             description,
             start_time,
@@ -407,6 +403,61 @@ impl LLMClient {
             priority,
             max_results: None,
         })
+    }
+
+    /// 日本時間フォールバック付きの日時解析
+    fn parse_datetime_with_jst_fallback(&self, datetime_str: &str) -> Option<DateTime<Utc>> {
+        use chrono::TimeZone;
+        
+        // RFC3339形式を最初に試行
+        if let Ok(dt) = DateTime::parse_from_rfc3339(datetime_str) {
+            return Some(dt.with_timezone(&Utc));
+        }
+        
+        // タイムゾーン付きフォーマット
+        let formats_with_tz = [
+            "%Y-%m-%dT%H:%M:%S%.fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S%.f%z",
+        ];
+
+        for format in &formats_with_tz {
+            if let Ok(dt) = DateTime::parse_from_str(datetime_str, format) {
+                return Some(dt.with_timezone(&Utc));
+            }
+        }
+        
+        // タイムゾーンなしの形式（日本時間として解釈）
+        let formats_naive = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M",
+            "%m/%d/%Y %H:%M:%S",
+            "%m/%d/%Y %H:%M",
+            "%Y年%m月%d日 %H:%M:%S",
+            "%Y年%m月%d日 %H:%M",
+            "%Y年%m月%d日",
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+        ];
+        
+        for format in &formats_naive {
+            if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(datetime_str, format) {
+                if let Some(jst_dt) = Tokyo.from_local_datetime(&naive_dt).single() {
+                    return Some(jst_dt.with_timezone(&Utc));
+                }
+            }
+            if let Ok(naive_date) = chrono::NaiveDate::parse_from_str(datetime_str, format) {
+                let naive_dt = naive_date.and_hms_opt(0, 0, 0).unwrap();
+                if let Some(jst_dt) = Tokyo.from_local_datetime(&naive_dt).single() {
+                    return Some(jst_dt.with_timezone(&Utc));
+                }
+            }
+        }
+        
+        None
     }
 }
 
@@ -434,6 +485,7 @@ impl LLM for MockLLMClient {
             Ok(LLMResponse {
                 action: ActionType::CreateEvent,
                 event_data: Some(EventData {
+                    id: None, // モックなのでUUIDはNone
                     title: Some("WEB会議".to_string()), // タイトルをWEB会議に固定
                     description: Some("LLMで解析された予定".to_string()),
                     start_time: Some(start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string()), // 仮の時刻

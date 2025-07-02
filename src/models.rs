@@ -70,6 +70,7 @@ pub enum ActionType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventData {
+    pub id: Option<String>, // Google CalendarのイベントID（更新や削除時に使用）
     pub title: Option<String>,
     pub description: Option<String>,
     pub start_time: Option<String>,
@@ -84,10 +85,6 @@ pub struct EventData {
 pub enum SchedulerError {
     #[error("Validation Error: {0}")]
     ValidationError(String),
-    #[error("Not Found: {0}")]
-    NotFound(String),
-    #[error("Conflict: {0}")]
-    Conflict(String),
     #[error("Parse Error: {0}")]
     ParseError(String),
     #[error("IO Error: {0}")]
@@ -129,31 +126,6 @@ impl Event {
             updated_at: now,
         }
     }
-
-    pub fn with_description(mut self, description: String) -> Self {
-        self.description = Some(description);
-        self.updated_at = Utc::now();
-        self
-    }
-
-    pub fn with_location(mut self, location: String) -> Self {
-        self.location = Some(location);
-        self.updated_at = Utc::now();
-        self
-    }
-
-    pub fn with_priority(mut self, priority: Priority) -> Self {
-        self.priority = priority;
-        self.updated_at = Utc::now();
-        self
-    }
-
-    pub fn add_attendee(mut self, attendee: String) -> Self {
-        self.attendees.push(attendee);
-        self.updated_at = Utc::now();
-        self
-    }
-
     // EventDataを適用する新しいメソッド
     pub fn apply_event_data(&mut self, event_data: EventData, parse_datetime: impl Fn(&str) -> Result<DateTime<Utc>, SchedulerError>) -> Result<(), SchedulerError> {
         if let Some(title) = event_data.title {
@@ -205,29 +177,6 @@ impl Schedule {
         self.events.push(event);
     }
 
-    pub fn remove_event(&mut self, event_id: Uuid) -> bool {
-        if let Some(pos) = self.events.iter().position(|e| e.id == event_id) {
-            self.events.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn get_event_mut(&mut self, event_id: Uuid) -> Option<&mut Event> {
-        self.events.iter_mut().find(|e| e.id == event_id)
-    }
-
-    pub fn get_events_by_date_range(
-        &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Vec<&Event> {
-        self.events
-            .iter()
-            .filter(|e| e.start_time >= start && e.start_time <= end)
-            .collect()
-    }
 
     // 重複チェック
     pub fn has_conflict(&self, start: &DateTime<Utc>, end: &DateTime<Utc>) -> bool {

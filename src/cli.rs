@@ -1,10 +1,6 @@
 use crate::calendar::CalendarService;
-use crate::scheduler::Scheduler;
-use std::sync::Arc;
 use crate::config::{Config, ConfigManager};
-use crate::llm::LLM;
-use crate::llm::{LLMClient, MockLLMClient};
-use crate::models::{ActionType, LLMRequest, Priority, Schedule};
+use crate::models::{Priority, Schedule};
 use crate::storage::Storage;
 use anyhow::Result;
 use chrono_tz::Asia::Tokyo;
@@ -12,7 +8,6 @@ use clap::{App, Arg, ArgMatches, SubCommand};
 use colored::*;
 use dialoguer::{Confirm, Select};
 use schedule_ai_agent::GoogleCalendarClient;
-use std::io::{self, Write};
 
 pub struct Cli {
     pub command: Option<String>,
@@ -39,6 +34,7 @@ impl Cli {
                     .takes_value(false),
             )
             .subcommand(SubCommand::with_name("interactive").about("Start interactive mode"))
+            .subcommand(SubCommand::with_name("tui").about("Start TUI chat mode"))
             .subcommand(
                 SubCommand::with_name("add")
                     .about("Add a new event")
@@ -246,15 +242,11 @@ impl Cli {
 }
 
 pub struct CliApp {
-    google_calendar: Option<GoogleCalendarClient>,
     local_schedule: Schedule,
     storage: Storage,
     config: Config,
     config_manager: ConfigManager,
-    llm_client: Option<Box<dyn LLM>>,
-    mock_llm_client: Box<dyn LLM>, // 型を変更
     calendar_service: Option<CalendarService>,
-    use_mock_llm: bool,
     #[allow(dead_code)]
     verbose: bool,
 }
@@ -290,31 +282,60 @@ impl CliApp {
         &self,
         datetime_str: &str,
     ) -> Result<chrono::DateTime<chrono::Utc>, crate::models::SchedulerError> {
+        use chrono::TimeZone;
+        use chrono_tz::Asia::Tokyo;
+        
         // ISO 8601形式の解析を試行
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(datetime_str) {
             return Ok(dt.with_timezone(&chrono::Utc));
         }
 
-        // その他の形式も試行
+        // タイムゾーン付きフォーマット
+        let formats_with_tz = [
+            "%Y-%m-%dT%H:%M:%S%.fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S%.f%z",
+        ];
+
+        for format in &formats_with_tz {
+            if let Ok(dt) = chrono::DateTime::parse_from_str(datetime_str, format) {
+                return Ok(dt.with_timezone(&chrono::Utc));
+            }
+        }
+
+        // タイムゾーンなしの形式（日本時間として解釈）
         let formats = [
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M",
+            "%m/%d/%Y %H:%M:%S",
             "%m/%d/%Y %H:%M",
+            "%Y年%m月%d日 %H:%M:%S",
+            "%Y年%m月%d日 %H:%M",
+            "%Y年%m月%d日",
+            "%Y-%m-%d",
             "%m/%d/%Y",
         ];
 
         for format in &formats {
             if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(datetime_str, format) {
-                return Ok(naive_dt.and_utc());
+                // 日本時間として解釈してUTCに変換
+                let jst_dt = Tokyo.from_local_datetime(&naive_dt).single()
+                    .ok_or_else(|| crate::models::SchedulerError::ParseError(format!("日本時間への変換に失敗: {}", datetime_str)))?;
+                return Ok(jst_dt.with_timezone(&chrono::Utc));
             }
             if let Ok(naive_date) = chrono::NaiveDate::parse_from_str(datetime_str, format) {
-                return Ok(naive_date.and_hms_opt(0, 0, 0).unwrap().and_utc());
+                let naive_dt = naive_date.and_hms_opt(0, 0, 0).unwrap();
+                let jst_dt = Tokyo.from_local_datetime(&naive_dt).single()
+                    .ok_or_else(|| crate::models::SchedulerError::ParseError(format!("日本時間への変換に失敗: {}", datetime_str)))?;
+                return Ok(jst_dt.with_timezone(&chrono::Utc));
             }
         }
 
         Err(crate::models::SchedulerError::ParseError(format!(
-            "日時の形式が認識できません: {}",
+            "日時の形式が認識できません。対応フォーマット例: '2025-07-01 15:30'、'2025年07月01日 15:30'、'2025-07-01T15:30:00' など: {}",
             datetime_str
         )))
     }
@@ -335,7 +356,7 @@ impl CliApp {
         }
     }
 
-    pub async fn new(use_mock_llm: bool, verbose: bool) -> Result<Self> {
+    pub async fn new(verbose: bool) -> Result<Self> {
         let storage = Storage::new()?;
         let mut local_schedule = Schedule::new();
 
@@ -358,23 +379,8 @@ impl CliApp {
             }
         }
 
-        let (llm_client, actual_use_mock_llm) = if !use_mock_llm {
-            match LLMClient::from_config(&config) {
-                Ok(client) => (Some(Box::new(client) as Box<dyn LLM>), false),
-                Err(e) => {
-                    if verbose {
-                        println!("{}: {}", "LLM接続エラー".red(), e);
-                        println!("{}", "モックLLMを使用します。".yellow());
-                    }
-                    (None, true)
-                }
-            }
-        } else {
-            (None, true)
-        };
-
         // Google Calendar初期化を試行
-        let google_calendar = if let Some(ref google_config) = config.google_calendar {
+        if let Some(ref google_config) = config.google_calendar {
             match GoogleCalendarClient::new(
                 google_config
                     .client_secret_path
@@ -409,15 +415,11 @@ impl CliApp {
         };
 
         Ok(Self {
-            google_calendar,
             local_schedule,
             storage,
             config,
             config_manager,
-            llm_client,
-            mock_llm_client: Box::new(MockLLMClient::new()), // Box::newでラップ
             calendar_service: None, // 初期化時はNone、必要に応じて後で初期化
-            use_mock_llm: actual_use_mock_llm,
             verbose,
         })
     }
@@ -767,6 +769,10 @@ impl CliApp {
     fn display_google_calendar_event(&self, event: &google_calendar3::api::Event, index: usize) {
         println!("\n--- イベント {} ---", index);
 
+        if let Some(id) = &event.id {
+            println!("🆔 ID: {}", id.yellow());
+        }
+
         if let Some(summary) = &event.summary {
             println!("📋 タイトル: {}", summary.green());
         }
@@ -835,6 +841,7 @@ impl CliApp {
         };
 
         let event_data = crate::models::EventData {
+            id: None,
             title: Some(title),
             description,
             start_time: Some(start),

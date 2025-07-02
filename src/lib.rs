@@ -133,6 +133,10 @@ impl GoogleCalendarClient {
     pub fn display_event(&self, event: &Event, index: usize) {
         println!("\n--- イベント {} ---", index);
         
+        if let Some(id) = &event.id {
+            println!("ID: {}", id);
+        }
+        
         if let Some(summary) = &event.summary {
             println!("タイトル: {}", summary);
         }
@@ -245,30 +249,59 @@ impl GoogleCalendarClient {
         
         // 日時解析のヘルパー関数
         fn parse_datetime(datetime_str: &str) -> Result<DateTime<Utc>> {
+            use chrono::TimeZone;
+            use chrono_tz::Asia::Tokyo;
+            
             // ISO 8601形式の解析を試行
             if let Ok(dt) = DateTime::parse_from_rfc3339(datetime_str) {
                 return Ok(dt.with_timezone(&Utc));
             }
 
-            // その他の形式も試行
+            // タイムゾーン付きフォーマット
+            let formats_with_tz = [
+                "%Y-%m-%dT%H:%M:%S%.fZ",
+                "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%S%.f%z",
+            ];
+
+            for format in &formats_with_tz {
+                if let Ok(dt) = DateTime::parse_from_str(datetime_str, format) {
+                    return Ok(dt.with_timezone(&Utc));
+                }
+            }
+
+            // タイムゾーンなしの形式（日本時間として解釈）
             let formats = [
                 "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M",
-                "%Y-%m-%d",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M",
+                "%m/%d/%Y %H:%M:%S",
                 "%m/%d/%Y %H:%M",
+                "%Y年%m月%d日 %H:%M:%S",
+                "%Y年%m月%d日 %H:%M",
+                "%Y年%m月%d日",
+                "%Y-%m-%d",
                 "%m/%d/%Y",
             ];
 
             for format in &formats {
                 if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(datetime_str, format) {
-                    return Ok(naive_dt.and_utc());
+                    // 日本時間として解釈してUTCに変換
+                    let jst_dt = Tokyo.from_local_datetime(&naive_dt).single()
+                        .ok_or_else(|| anyhow::anyhow!("日本時間への変換に失敗: {}", datetime_str))?;
+                    return Ok(jst_dt.with_timezone(&Utc));
                 }
                 if let Ok(naive_date) = chrono::NaiveDate::parse_from_str(datetime_str, format) {
-                    return Ok(naive_date.and_hms_opt(0, 0, 0).unwrap().and_utc());
+                    let naive_dt = naive_date.and_hms_opt(0, 0, 0).unwrap();
+                    let jst_dt = Tokyo.from_local_datetime(&naive_dt).single()
+                        .ok_or_else(|| anyhow::anyhow!("日本時間への変換に失敗: {}", datetime_str))?;
+                    return Ok(jst_dt.with_timezone(&Utc));
                 }
             }
 
-            Err(anyhow::anyhow!("日時の形式が認識できません: {}", datetime_str))
+            Err(anyhow::anyhow!("日時の形式が認識できません。対応フォーマット例: '2025-07-01 15:30'、'2025年07月01日 15:30'、'2025-07-01T15:30:00' など: {}", datetime_str))
         }
         
         let start_time = parse_datetime(start_time)?;
@@ -297,6 +330,22 @@ impl GoogleCalendarClient {
 
         let created_event = self.create_primary_event(event).await?;
         Ok(created_event.id.unwrap_or_default())
+    }
+
+    /// 指定されたIDのイベントを取得する
+    pub async fn get_event_by_id(&self, calendar_id: &str, event_id: &str) -> Result<Event> {
+        let result = self.hub
+            .events()
+            .get(calendar_id, event_id)
+            .doit()
+            .await?;
+
+        Ok(result.1)
+    }
+
+    /// プライマリカレンダーからIDでイベントを取得する
+    pub async fn get_primary_event_by_id(&self, event_id: &str) -> Result<Event> {
+        self.get_event_by_id("primary", event_id).await
     }
 }
 
@@ -336,6 +385,7 @@ impl EventBuilder {
         use google_calendar3::api::EventDateTime;
         let mut start = EventDateTime::default();
         start.date_time = Some(start_time);
+        start.time_zone = Some("Asia/Tokyo".to_string());
         self.event.start = Some(start);
         self
     }
@@ -345,6 +395,7 @@ impl EventBuilder {
         use google_calendar3::api::EventDateTime;
         let mut end = EventDateTime::default();
         end.date_time = Some(end_time);
+        end.time_zone = Some("Asia/Tokyo".to_string());
         self.event.end = Some(end);
         self
     }
