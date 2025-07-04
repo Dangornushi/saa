@@ -348,6 +348,25 @@ impl ChatApp {
                             if !self.show_help && !self.is_processing {
                                 let input_text = self.input.trim().to_string();
                                 if !input_text.is_empty() {
+                                    // デバッグコマンドかどうかをチェック
+                                    if let Some(response) = self.handle_debug_commands(&input_text) {
+                                        // デバッグコマンドの場合は即座に応答を表示
+                                        self.messages.push(ChatMessage {
+                                            role: MessageRole::User,
+                                            content: input_text.clone(),
+                                            timestamp: chrono::Local::now(),
+                                        });
+                                        self.messages.push(ChatMessage {
+                                            role: MessageRole::Assistant,
+                                            content: response,
+                                            timestamp: chrono::Local::now(),
+                                        });
+                                        self.input.clear();
+                                        self.cursor_position = 0;
+                                        self.update_scroll_to_bottom();
+                                        continue;
+                                    }
+                                    
                                     // 先にユーザーメッセージを追加して画面に表示
                                     self.messages.push(ChatMessage {
                                         role: MessageRole::User,
@@ -396,9 +415,14 @@ impl ChatApp {
                                     
                                     // AIの処理を実行
                                     let processing_msg_index = self.messages.len() - 1;
+                                    if schedule_ai_agent::debug::is_debug_enabled() {
+                                        eprintln!("🔍 TUI DEBUG: AIの処理を開始します: '{}'", input_text);
+                                    }
                                     match self.scheduler.process_user_input(input_text).await {
                                         Ok(response) => {
+                                            eprintln!("🔍 TUI DEBUG: AIからレスポンスを受信: '{}'", response);
                                             let cleaned_response = self.clean_response(&response);
+                                            eprintln!("🔍 TUI DEBUG: クリーンアップ後のレスポンス: '{}'", cleaned_response);
                                             if let Some(msg) = self.messages.get_mut(processing_msg_index) {
                                                 msg.content = if cleaned_response.is_empty() {
                                                     "✅ 処理が完了しました。".to_string()
@@ -406,9 +430,11 @@ impl ChatApp {
                                                     cleaned_response
                                                 };
                                                 msg.timestamp = chrono::Local::now();
+                                                eprintln!("🔍 TUI DEBUG: メッセージを更新しました: '{}'", msg.content);
                                             }
                                         }
                                         Err(e) => {
+                                            eprintln!("🔍 TUI DEBUG: エラーが発生: {:?}", e);
                                             if let Some(msg) = self.messages.get_mut(processing_msg_index) {
                                                 msg.content = format!("❌ エラーが発生しました:\n{}\n\n💡 別の方法で試してみてください。", e);
                                                 msg.timestamp = chrono::Local::now();
@@ -495,10 +521,13 @@ impl ChatApp {
     }
 
     async fn handle_user_input(&mut self, input: String) -> Result<()> {
+        // AIの応答を取得するためにinputをクローン
+        let input_for_processing = input.clone();
+        
         // ユーザーメッセージを追加
         self.messages.push(ChatMessage {
             role: MessageRole::User,
-            content: input.clone(),
+            content: input,
             timestamp: chrono::Local::now(),
         });
 
@@ -517,7 +546,7 @@ impl ChatApp {
         let processing_msg_index = self.messages.len() - 1;
 
         // AIの応答を取得
-        match self.scheduler.process_user_input(input).await {
+        match self.scheduler.process_user_input(input_for_processing).await {
             Ok(response) => {
                 // AIの応答をクリーンアップ
                 let cleaned_response = self.clean_response(&response);
@@ -533,9 +562,9 @@ impl ChatApp {
                 }
             }
             Err(e) => {
-                // 処理中メッセージをエラーメッセージに置き換え
+                // エラーメッセージを表示（scheduler.rsで既にAIの応答とエラーメッセージが組み合わされている）
                 if let Some(msg) = self.messages.get_mut(processing_msg_index) {
-                    msg.content = format!("❌ エラーが発生しました:\n{}\n\n💡 別の方法で試してみてください。", e);
+                    msg.content = format!("🤖 {}", e);
                     msg.timestamp = chrono::Local::now();
                 }
             }
@@ -549,6 +578,9 @@ impl ChatApp {
 
     /// ユーザーメッセージが既に追加されている状態で処理を行う
     async fn handle_user_input_with_existing_message(&mut self, input: String) -> Result<()> {
+        // AIの応答を取得するためにinputをクローン
+        let input_for_processing = input.clone();
+        
         // 処理中メッセージを表示
         self.messages.push(ChatMessage {
             role: MessageRole::Assistant,
@@ -564,7 +596,7 @@ impl ChatApp {
         let processing_msg_index = self.messages.len() - 1;
 
         // AIの応答を取得
-        match self.scheduler.process_user_input(input).await {
+        match self.scheduler.process_user_input(input_for_processing).await {
             Ok(response) => {
                 // AIの応答をクリーンアップ
                 let cleaned_response = self.clean_response(&response);
@@ -580,9 +612,9 @@ impl ChatApp {
                 }
             }
             Err(e) => {
-                // 処理中メッセージをエラーメッセージに置き換え
+                // エラーメッセージを表示（scheduler.rsで既にAIの応答とエラーメッセージが組み合わされている）
                 if let Some(msg) = self.messages.get_mut(processing_msg_index) {
-                    msg.content = format!("❌ エラーが発生しました:\n{}\n\n💡 別の方法で試してみてください。", e);
+                    msg.content = format!("🤖 {}", e);
                     msg.timestamp = chrono::Local::now();
                 }
             }
@@ -942,6 +974,15 @@ impl ChatApp {
             Line::from("  • 'Google Calendarと同期して'"),
             Line::from(""),
             Line::from(vec![
+                Span::styled("🔧 Debug Commands:", Style::default().fg(Color::Red).add_modifier(Modifier::UNDERLINED))
+            ]),
+            Line::from("  • '/debug on' - Enable debug mode"),
+            Line::from("  • '/debug off' - Disable debug mode"),
+            Line::from("  • '/debug toggle' - Toggle debug mode"),
+            Line::from("  • '/debug status' - Show debug status"),
+            Line::from("  • '/debug help' - Show debug help"),
+            Line::from(""),
+            Line::from(vec![
                 Span::styled("🎯 Features:", Style::default().fg(Color::Magenta).add_modifier(Modifier::UNDERLINED))
             ]),
             Line::from("  • Natural language schedule management"),
@@ -965,6 +1006,33 @@ impl ChatApp {
             .wrap(Wrap { trim: true });
 
         f.render_widget(help_paragraph, area);
+    }
+
+    /// デバッグコマンドを処理する
+    fn handle_debug_commands(&mut self, input: &str) -> Option<String> {
+        match input {
+            "/debug on" => {
+                self.scheduler.set_debug_mode(true);
+                Some("✅ デバッグモードを有効にしました。".to_string())
+            }
+            "/debug off" => {
+                self.scheduler.set_debug_mode(false);
+                Some("✅ デバッグモードを無効にしました。".to_string())
+            }
+            "/debug toggle" => {
+                self.scheduler.toggle_debug_mode();
+                let status = if self.scheduler.is_debug_enabled() { "有効" } else { "無効" };
+                Some(format!("✅ デバッグモードを{}にしました。", status))
+            }
+            "/debug status" => {
+                let status = if self.scheduler.is_debug_enabled() { "有効" } else { "無効" };
+                Some(format!("📊 デバッグモードの現在の状態: {}", status))
+            }
+            "/debug help" => {
+                Some("🔧 デバッグコマンド一覧:\n• /debug on - デバッグモードを有効にする\n• /debug off - デバッグモードを無効にする\n• /debug toggle - デバッグモードをトグルする\n• /debug status - デバッグモードの状態を表示\n• /debug help - このヘルプを表示".to_string())
+            }
+            _ => None,
+        }
     }
 }
 

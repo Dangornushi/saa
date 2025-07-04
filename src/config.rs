@@ -40,6 +40,7 @@ pub struct AppConfig {
     pub backup_count: Option<usize>,
     pub auto_backup: Option<bool>,
     pub verbose: Option<bool>,
+    pub debug_mode: Option<bool>,
 }
 
 impl Default for Config {
@@ -64,6 +65,7 @@ impl Default for Config {
                 backup_count: Some(5),
                 auto_backup: Some(true),
                 verbose: Some(false),
+                debug_mode: Some(false),
             },
         }
     }

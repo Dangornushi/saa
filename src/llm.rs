@@ -4,7 +4,6 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use chrono_tz::Asia::Tokyo;
-use colored::Colorize;
 use serde_json::{Value, json};
 use std::env; // 追加
 
@@ -278,11 +277,6 @@ impl LLMClient {
         // JSON形式での応答を期待
         let response_json: Value = serde_json::from_str(content)
             .map_err(|e| anyhow!("Failed to parse LLM response: {}\nResponse: {}", e, content))?;
-
-        println!(
-            "LLM Response: {}",
-            response_json.to_string().yellow()
-        );
 
         let action_str = response_json["action"]
             .as_str()

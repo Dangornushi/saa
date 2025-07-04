@@ -3,11 +3,11 @@ use crate::models::{
     ActionType, ConversationHistory, EventData, LLMRequest, LLMResponse, SchedulerError
 };
 use crate::storage::Storage;
+use crate::config::Config;
 use schedule_ai_agent::GoogleCalendarClient;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use chrono_tz::Asia::Tokyo;
-use colored::Colorize;
 use std::sync::Arc;
 
 pub struct Scheduler {
@@ -15,26 +15,39 @@ pub struct Scheduler {
     llm: Arc<dyn LLM>,
     storage: Storage,
     calendar_client: Option<GoogleCalendarClient>,
+    config: Config,
 }
 
 impl Scheduler {
     pub fn new(llm: Arc<dyn LLM>) -> Result<Self> {
         let storage = Storage::new()?;
         let conversation_history = storage.load_conversation_history()?;
+        let config = Config::default();
+        
+        // デバッグモードを設定
+        if let Some(debug_mode) = config.app.debug_mode {
+            schedule_ai_agent::debug::set_debug_mode(debug_mode);
+        }
 
         Ok(Self {
             conversation_history,
             llm,
             storage,
             calendar_client: None,
+            config,
         })
     }
 
 
-    /// 日時解析のヘルパー関
     pub async fn new_with_calendar(llm: Arc<dyn LLM>, client_secret_path: &str, token_cache_path: &str) -> Result<Self> {
         let storage = Storage::new()?;
         let conversation_history = storage.load_conversation_history()?;
+        let config = Config::default();
+        
+        // デバッグモードを設定
+        if let Some(debug_mode) = config.app.debug_mode {
+            schedule_ai_agent::debug::set_debug_mode(debug_mode);
+        }
         
         let calendar_client = GoogleCalendarClient::new(client_secret_path, token_cache_path).await?;
 
@@ -43,10 +56,15 @@ impl Scheduler {
             llm,
             storage,
             calendar_client: Some(calendar_client),
+            config,
         })
     }
 
     pub async fn process_user_input(&mut self, user_input: String) -> Result<String> {
+        if schedule_ai_agent::debug::is_debug_enabled() {
+            eprintln!("🔍 DEBUG: ======== USER INPUT PROCESSING ========");
+            eprintln!("🔍 DEBUG: process_user_input が呼ばれました: '{}'", user_input);
+        }
 
         // llmへのリクエストを作成
         let request = LLMRequest {
@@ -55,9 +73,18 @@ impl Scheduler {
             conversation_history: Some(self.conversation_history.clone()),
         };
 
+        if schedule_ai_agent::debug::is_debug_enabled() {
+            eprintln!("🔍 DEBUG: LLMリクエストを作成しました");
+        }
+
         // llmにリクエストを送信
         // llmからの応答を待機
         let response = self.llm.process_request(request).await?;
+
+        if schedule_ai_agent::debug::is_debug_enabled() {
+            eprintln!("🔍 DEBUG: LLMからレスポンスを受信: action={:?}, response_text='{}'", 
+                     response.action, response.response_text);
+        }
 
         // 会話履歴を更新
         if let Some(updated_conversation) = response.updated_conversation.clone() {
@@ -83,7 +110,6 @@ impl Scheduler {
                     .map(|_| "予定を削除しました。".to_string())
                     .map_err(|e| anyhow::anyhow!(e))
                 } else {
-                    println!("イベントデータがありません。");
                     Ok("イベントデータが不足しています。".to_string())
                 }
             }
@@ -104,18 +130,51 @@ impl Scheduler {
         // 成功時はresponse_textがあればそれを、なければ処理結果を返す
         match result {
             Ok(msg) => {
-                if !response.response_text.is_empty() {
-                    Ok(response.response_text)
-                } else {
-                    Ok(msg)
+                if schedule_ai_agent::debug::is_debug_enabled() {
+                    eprintln!("🔍 DEBUG: 処理結果を取得: '{}'", msg);
                 }
+                // ListEventsアクションの場合は、結果を優先して返す
+                let final_result = match response.action {
+                    ActionType::ListEvents => {
+                        if schedule_ai_agent::debug::is_debug_enabled() {
+                            eprintln!("🔍 DEBUG: ListEventsアクション - 結果を優先");
+                        }
+                        msg
+                    },
+                    _ => {
+                        if !response.response_text.is_empty() {
+                            if schedule_ai_agent::debug::is_debug_enabled() {
+                                eprintln!("🔍 DEBUG: response_textを使用: '{}'", response.response_text);
+                            }
+                            response.response_text
+                        } else {
+                            if schedule_ai_agent::debug::is_debug_enabled() {
+                                eprintln!("🔍 DEBUG: 処理結果を使用: '{}'", msg);
+                            }
+                            msg
+                        }
+                    }
+                };
+                if schedule_ai_agent::debug::is_debug_enabled() {
+                    eprintln!("🔍 DEBUG SUCCESS: 最終結果: '{}'", final_result);
+                }
+                Ok(final_result)
             }
             Err(e) => {
-                let error_msg = format!("エラーが発生しました: {}", e);
+                if schedule_ai_agent::debug::is_debug_enabled() {
+                    eprintln!("🔍 DEBUG ERROR: エラーが発生: {:?}", e);
+                }
+                // AIの応答メッセージとエラーメッセージを組み合わせる
+                let combined_msg = if !response.response_text.is_empty() {
+                    format!("{}\n\n❌ エラーが発生しました: {}", response.response_text, e)
+                } else {
+                    format!("❌ エラーが発生しました: {}", e)
+                };
+                
                 // エラーメッセージを会話履歴に追加（失敗しても処理を続行）
-                let _ = self.conversation_history.add_assistant_message(error_msg.clone(), None);
+                let _ = self.conversation_history.add_assistant_message(combined_msg.clone(), None);
                 let _ = self.save_conversation_history();
-                Ok(error_msg)
+                Ok(combined_msg)
             }
         }
     }
@@ -193,83 +252,126 @@ impl Scheduler {
             query_end.format("%Y年%m月%d日 %H:%M")
         );
 
+        // デバッグ: LLMレスポンスの情報を確認
+        if schedule_ai_agent::debug::is_debug_enabled() {
+            eprintln!("🔍 DEBUG: LLMレスポンス確認:");
+            eprintln!("🔍 DEBUG: • アクション: {:?}", response.action);
+            eprintln!("🔍 DEBUG: • レスポンステキスト: '{}'", response.response_text);
+            eprintln!("🔍 DEBUG: • 開始時刻: {:?}", response.start_time);
+            eprintln!("🔍 DEBUG: • 終了時刻: {:?}", response.end_time);
+        }
+
         // Google Calendarから予定を取得
         match &self.calendar_client {
             Some(google_calendar) => {
                 match google_calendar.get_events_in_range("primary", query_start, query_end, 50).await {
-                    Ok(events) => self.display_calendar_events(&events, &query_range_str),
-                    Err(e) => println!("{}: {}", "Google Calendar取得エラー".red(), e),
+                    Ok(events) => {
+                        let formatted_events = self.format_calendar_events(&events, &query_range_str);
+                        
+                        // デバッグ情報を追加
+                        let event_count = events.items.as_ref().map(|items| items.len()).unwrap_or(0);
+                        if schedule_ai_agent::debug::is_debug_enabled() {
+                            eprintln!("🔍 DEBUG: 検索結果: {} 件のイベントが見つかりました", event_count);
+                            eprintln!("🔍 DEBUG: 時間範囲: {} - {}", 
+                                query_start.format("%Y-%m-%d %H:%M"),
+                                query_end.format("%Y-%m-%d %H:%M")
+                            );
+                        }
+                        
+                        Ok(formatted_events)
+                    }
+                    Err(e) => {
+                        if schedule_ai_agent::debug::is_debug_enabled() {
+                            eprintln!("🔍 DEBUG ERROR: Google Calendar取得エラー: {}", e);
+                        }
+                        Ok(format!("❌ Google Calendar取得エラー: {}", e))
+                    }
                 }
             }
-            None => println!("{}", "Google Calendarが設定されていません。".yellow()),
+            None => {
+                if schedule_ai_agent::debug::is_debug_enabled() {
+                    eprintln!("🔍 DEBUG WARN: Google Calendarが設定されていません");
+                }
+                Ok("⚠️ Google Calendarが設定されていません。".to_string())
+            }
         }
-
-        Ok("OK".to_string())
     }
     
     // カレンダー関連のコマンド実装 
 
-    /// Google Calendarイベントを表示する共通メソッド
-    fn display_calendar_events(&self, events: &google_calendar3::api::Events, title: &str) {
-        println!("{}", title.bold().blue());
+    /// Google Calendarイベントをフォーマットして文字列で返す
+    fn format_calendar_events(&self, events: &google_calendar3::api::Events, title: &str) -> String {
+        let mut result = format!("{}\n", title);
         
         match &events.items {
             Some(items) if !items.is_empty() => {
                 for (i, event) in items.iter().enumerate() {
-                    self.display_google_calendar_event(event, i + 1);
+                    result.push_str(&self.format_google_calendar_event(event, i + 1));
                 }
             }
-            _ => println!("{}", "予定はありません。".yellow()),
+            _ => result.push_str("📝 予定はありません。\n"),
         }
+        
+        result
     }
 
-    /// Google Calendarのイベントを表示
-    fn display_google_calendar_event(&self, event: &google_calendar3::api::Event, index: usize) {
-        println!("\n--- イベント {} ---", index);
+    /// Google Calendarのイベントをフォーマットして文字列で返す
+    fn format_google_calendar_event(&self, event: &google_calendar3::api::Event, index: usize) -> String {
+        let mut result = format!("{}. ", index);
 
-        if let Some(id) = &event.id {
-            println!("🆔 ID: {}", id.yellow());
-        }
-
+        // タイトル（必須項目として最初に表示）
         if let Some(summary) = &event.summary {
-            println!("📋 タイトル: {}", summary.green());
+            result.push_str(&format!("📝 {}", summary));
+        } else {
+            result.push_str("📝 (タイトルなし)");
         }
 
+        // 開始・終了時刻を1行にまとめる
+        let mut time_info = String::new();
         if let Some(start) = &event.start {
             if let Some(date_time) = &start.date_time {
                 let start_jst = date_time.with_timezone(&Tokyo);
-                println!("🕐 開始時刻: {}", start_jst.format("%Y-%m-%d %H:%M").to_string().blue());
+                time_info.push_str(&format!("{}", start_jst.format("%m/%d %H:%M")));
             } else if let Some(date) = &start.date {
-                println!("📅 開始日: {}", date.to_string().blue());
+                time_info.push_str(&format!("{}", date.format("%m/%d")));
             }
         }
 
         if let Some(end) = &event.end {
             if let Some(date_time) = &end.date_time {
                 let end_jst = date_time.with_timezone(&Tokyo);
-                println!("🕐 終了時刻: {}", end_jst.format("%Y-%m-%d %H:%M").to_string().blue());
+                time_info.push_str(&format!("-{}", end_jst.format("%H:%M")));
             } else if let Some(date) = &end.date {
-                println!("📅 終了日: {}", date.to_string().blue());
+                if !time_info.is_empty() {
+                    time_info.push_str(&format!("-{}", date));
+                }
             }
         }
 
-        if let Some(description) = &event.description {
-            println!("📝 説明: {}", description);
+        if !time_info.is_empty() {
+            result.push_str(&format!(" 🕐 {}", time_info));
         }
 
+        // 場所（ある場合のみ）
         if let Some(location) = &event.location {
-            println!("📍 場所: {}", location.cyan());
+            result.push_str(&format!(" 📍 {}", location));
         }
+
+        result.push('\n');
+        result
     }
 
     /// クエリの時間範囲を取得
     fn get_query_time_range(&self, response: &LLMResponse) -> (DateTime<Utc>, DateTime<Utc>) {
-        // LLMのレスポンスから時間範囲を取得、なければ現在時刻を返す
+        // LLMのレスポンスから時間範囲を取得、なければデフォルトの範囲を返す
         match (response.start_time, response.end_time) {
             (Some(start), Some(end)) => (start, end),
             _ => {
-                println!("時間範囲が指定されていません。");
-                (Utc::now(), Utc::now())
+                // デフォルト: 今日の00:00から1週間後の23:59まで
+                let now = Utc::now();
+                let start_of_today = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+                let end_of_week = start_of_today + chrono::Duration::days(7) - chrono::Duration::seconds(1);
+                (start_of_today, end_of_week)
             }
         }
     }
@@ -299,10 +401,10 @@ impl Scheduler {
                 event_data.location.as_deref(),
             ).await {
                 Ok(_id) => {
-                    println!("Google Calendarにイベントを作成しました: {}", title);
+                    // 成功時のログはコメントアウト（TUIに表示されるため）
+                    // Google Calendarにイベントを作成しました
                 }
                 Err(e) => {
-                    println!("Google Calendarへの作成に失敗しました: {}", e);
                     return Err(e.into());
                 }
             }
@@ -333,13 +435,10 @@ impl Scheduler {
         if let Some(ref calendar_client) = self.calendar_client {
             // イベントIDが指定されている場合
             if let Some(event_id) = &event_data.id {
-                println!("Google CalendarからイベントIDで削除中: {}", event_id);
                 calendar_client.delete_event("primary", event_id).await
                     .map_err(|e| format!("Google Calendarからの削除に失敗しました: {}", e))?;
-                println!("Google Calendarからイベントを削除しました: {}", event_id);
             } else if let Some(title) = &event_data.title {
                 // タイトルで検索して削除（従来の方法）
-                println!("タイトルでイベントを検索して削除中: {}", title);
                 // 今日の予定から該当するタイトルのイベントを検索
                 match calendar_client.get_primary_events(50).await {
                     Ok(events) => {
@@ -350,7 +449,6 @@ impl Scheduler {
                                 if let Some(event_id) = &event.id {
                                     calendar_client.delete_event("primary", event_id).await
                                         .map_err(|e| format!("Google Calendarからの削除に失敗しました: {}", e))?;
-                                    println!("Google Calendarからイベントを削除しました: {}", title);
                                 } else {
                                     return Err("イベントIDが見つかりません".to_string());
                                 }
@@ -500,6 +598,55 @@ impl Scheduler {
             sync_messages.len(),
             sync_messages.join("\n")
         ))
+    }
+
+    /// デバッグモードを設定
+    pub fn set_debug_mode(&mut self, enabled: bool) {
+        self.config.app.debug_mode = Some(enabled);
+        schedule_ai_agent::debug::set_debug_mode(enabled);
+        
+        if enabled {
+            if schedule_ai_agent::debug::is_debug_enabled() {
+                eprintln!("🔍 DEBUG SUCCESS: デバッグモードを有効にしました");
+            }
+        } else {
+            eprintln!("デバッグモードを無効にしました");
+        }
+    }
+
+    /// デバッグモードの状態を取得
+    pub fn is_debug_enabled(&self) -> bool {
+        schedule_ai_agent::debug::is_debug_enabled()
+    }
+
+    /// デバッグモードの状態を切り替え
+    pub fn toggle_debug_mode(&mut self) {
+        let current_state = self.is_debug_enabled();
+        self.set_debug_mode(!current_state);
+    }
+
+    /// 設定ファイルからデバッグ設定を読み込み
+    pub fn load_debug_config(&mut self) -> Result<()> {
+        use crate::config::ConfigManager;
+        
+        let config_manager = ConfigManager::new()?;
+        let config = config_manager.load_config()?;
+        
+        if let Some(debug_mode) = config.app.debug_mode {
+            self.set_debug_mode(debug_mode);
+        }
+        
+        self.config = config;
+        Ok(())
+    }
+
+    /// 設定ファイルにデバッグ設定を保存
+    pub fn save_debug_config(&self) -> Result<()> {
+        use crate::config::ConfigManager;
+        
+        let config_manager = ConfigManager::new()?;
+        config_manager.save_config(&self.config)?;
+        Ok(())
     }
 }
 

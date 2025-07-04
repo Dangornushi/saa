@@ -1,3 +1,6 @@
+// デバッグ用のモジュール
+pub mod debug;
+
 use google_calendar3::{CalendarHub, oauth2, api::Event, api::Events};
 use hyper_rustls::HttpsConnectorBuilder;
 use oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};

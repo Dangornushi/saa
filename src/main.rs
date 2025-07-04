@@ -14,7 +14,6 @@ mod tests;
 use anyhow::Result;
 use cli::{Cli, CliApp};
 use config::ConfigManager;
-use interactive::InteractiveMode;
 use llm::{LLMClient, MockLLMClient, LLM};
 use scheduler::Scheduler;
 use std::sync::Arc;
@@ -45,6 +44,11 @@ async fn tui_mode(use_mock_llm: bool) -> Result<()> {
     
     let config_manager = ConfigManager::new()?;
     let config = config_manager.load_config()?;
+
+    // 設定からデバッグモードを読み込み
+    if let Some(debug_mode) = config.app.debug_mode {
+        schedule_ai_agent::debug::set_debug_mode(debug_mode);
+    }
 
     let llm: Arc<dyn LLM> = if use_mock_llm {
         Arc::new(MockLLMClient::new())

@@ -111,6 +111,22 @@ impl Cli {
             .subcommand(SubCommand::with_name("backup").about("Backup schedule"))
             .subcommand(SubCommand::with_name("restore").about("Restore from backup"))
             .subcommand(
+                SubCommand::with_name("debug")
+                    .about("Debug mode control")
+                    .subcommand(
+                        SubCommand::with_name("on").about("Enable debug mode"),
+                    )
+                    .subcommand(
+                        SubCommand::with_name("off").about("Disable debug mode"),
+                    )
+                    .subcommand(
+                        SubCommand::with_name("toggle").about("Toggle debug mode"),
+                    )
+                    .subcommand(
+                        SubCommand::with_name("status").about("Show debug mode status"),
+                    ),
+            )
+            .subcommand(
                 SubCommand::with_name("conversation")
                     .about("Conversation history management")
                     .subcommand(
@@ -457,6 +473,49 @@ impl CliApp {
             Some("stats") => self.show_statistics(),
             Some("backup") => self.backup_command(),
             Some("restore") => self.restore_command(),
+            Some("debug") => {
+                if let Some(debug_matches) = cli.matches.subcommand_matches("debug") {
+                    match debug_matches.subcommand() {
+                        ("on", _) => {
+                            schedule_ai_agent::debug::set_debug_mode(true);
+                            println!("✅ デバッグモードを有効にしました。");
+                            Ok(())
+                        }
+                        ("off", _) => {
+                            schedule_ai_agent::debug::set_debug_mode(false);
+                            println!("✅ デバッグモードを無効にしました。");
+                            Ok(())
+                        }
+                        ("toggle", _) => {
+                            let current = schedule_ai_agent::debug::is_debug_enabled();
+                            schedule_ai_agent::debug::set_debug_mode(!current);
+                            println!("✅ デバッグモードを{}にしました。", 
+                                   if !current { "有効" } else { "無効" });
+                            Ok(())
+                        }
+                        ("status", _) => {
+                            let status = if schedule_ai_agent::debug::is_debug_enabled() { "有効" } else { "無効" };
+                            println!("📊 デバッグモードの現在の状態: {}", status);
+                            Ok(())
+                        }
+                        _ => {
+                            println!("利用可能なデバッグコマンド:");
+                            println!("  on      - デバッグモードを有効にする");
+                            println!("  off     - デバッグモードを無効にする");
+                            println!("  toggle   - デバッグモードをトグルする");
+                            println!("  status  - デバッグモードの状態を表示");
+                            Ok(())
+                        }
+                    }
+                } else {
+                    println!("利用可能なデバッグコマンド:");
+                    println!("  on      - デバッグモードを有効にする");
+                    println!("  off     - デバッグモードを無効にする");
+                    println!("  toggle   - デバッグモードをトグルする");
+                    println!("  status  - デバッグモードの状態を表示");
+                    Ok(())
+                }
+            }
             Some("conversation") => {
                 if let Some(conversation_matches) = cli.matches.subcommand_matches("conversation") {
                     match conversation_matches.subcommand() {
