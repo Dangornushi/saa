@@ -420,9 +420,13 @@ impl ChatApp {
                                     }
                                     match self.scheduler.process_user_input(input_text).await {
                                         Ok(response) => {
-                                            eprintln!("🔍 TUI DEBUG: AIからレスポンスを受信: '{}'", response);
+                                            if schedule_ai_agent::debug::is_debug_enabled() {
+                                                eprintln!("🔍 TUI DEBUG: AIからレスポンスを受信: '{}'", response);
+                                            }
                                             let cleaned_response = self.clean_response(&response);
-                                            eprintln!("🔍 TUI DEBUG: クリーンアップ後のレスポンス: '{}'", cleaned_response);
+                                            if schedule_ai_agent::debug::is_debug_enabled() {
+                                                eprintln!("🔍 TUI DEBUG: クリーンアップ後のレスポンス: '{}'", cleaned_response);
+                                            }
                                             if let Some(msg) = self.messages.get_mut(processing_msg_index) {
                                                 msg.content = if cleaned_response.is_empty() {
                                                     "✅ 処理が完了しました。".to_string()
@@ -430,11 +434,15 @@ impl ChatApp {
                                                     cleaned_response
                                                 };
                                                 msg.timestamp = chrono::Local::now();
-                                                eprintln!("🔍 TUI DEBUG: メッセージを更新しました: '{}'", msg.content);
+                                                if schedule_ai_agent::debug::is_debug_enabled() {
+                                                    eprintln!("🔍 TUI DEBUG: メッセージを更新しました: '{}'", msg.content);
+                                                }
                                             }
                                         }
                                         Err(e) => {
-                                            eprintln!("🔍 TUI DEBUG: エラーが発生: {:?}", e);
+                                            if schedule_ai_agent::debug::is_debug_enabled() {
+                                                eprintln!("🔍 TUI DEBUG: エラーが発生: {:?}", e);
+                                            }
                                             if let Some(msg) = self.messages.get_mut(processing_msg_index) {
                                                 msg.content = format!("❌ エラーが発生しました:\n{}\n\n💡 別の方法で試してみてください。", e);
                                                 msg.timestamp = chrono::Local::now();
